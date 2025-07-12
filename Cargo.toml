@@ -1,0 +1,17 @@
+[package]
+name = "stem-splitter-core"
+version = "0.1.0"
+edition = "2021"
+description = "Core library for AI-powered audio stem separation"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/your-username/stem-splitter-core"
+homepage = "https://github.com/your-username/stem-splitter-core"
+documentation = "https://docs.rs/stem-splitter-core"
+readme = "README.md"
+keywords = ["audio", "stem", "separation", "ai", "music"]
+categories = ["multimedia::audio", "science"]
+authors = ["Your Name <your.email@example.com>"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
