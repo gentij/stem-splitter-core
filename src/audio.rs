@@ -3,12 +3,8 @@ use std::{fs::File, path::Path};
 use anyhow::{Context, Result};
 use hound::WavWriter;
 use symphonia::core::{
-    audio::SampleBuffer,
-    codecs::DecoderOptions,
-    formats::{FormatOptions, FormatReader},
-    io::MediaSourceStream,
-    meta::MetadataOptions,
-    probe::Hint,
+    audio::SampleBuffer, codecs::DecoderOptions, formats::FormatOptions, io::MediaSourceStream,
+    meta::MetadataOptions, probe::Hint,
 };
 use symphonia::default::{get_codecs, get_probe};
 
