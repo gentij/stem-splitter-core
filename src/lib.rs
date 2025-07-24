@@ -9,7 +9,7 @@ mod pipeline;
 mod types;
 
 pub use crate::{
-    audio::read_wav_mono,
+    audio::{read_audio, write_audio},
     model::{DummyModel, StemModel},
     pipeline::split_file,
     types::{StemResult, StemSplitter, StemSplitterConfig},

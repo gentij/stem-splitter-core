@@ -1,45 +1,81 @@
+use std::{fs::File, path::Path};
+
 use anyhow::{Context, Result};
-use hound::{SampleFormat, WavReader};
+use hound::WavWriter;
+use symphonia::core::{
+    audio::SampleBuffer,
+    codecs::DecoderOptions,
+    formats::{FormatOptions, FormatReader},
+    io::MediaSourceStream,
+    meta::MetadataOptions,
+    probe::Hint,
+};
+use symphonia::default::{get_codecs, get_probe};
 
-pub fn read_wav_mono(path: &str) -> Result<Vec<f32>> {
-    let mut reader =
-        WavReader::open(path).with_context(|| format!("Failed to open WAV file: {}", path))?;
+use crate::types::AudioData;
 
-    let spec = reader.spec();
+pub fn read_audio<P: AsRef<Path>>(path: P) -> Result<AudioData> {
+    let path: &Path = path.as_ref();
 
-    if spec.sample_format != SampleFormat::Int {
-        anyhow::bail!("Only PCM (integer) format is supported.");
+    let file: File =
+        File::open(path).with_context(|| format!("Failed to open audio file: {:?}", path))?;
+
+    let mss: MediaSourceStream = MediaSourceStream::new(Box::new(file), Default::default());
+
+    let mut hint: Hint = Hint::new();
+
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
     }
 
-    let norm_factor = match spec.bits_per_sample {
-        16 => i16::MAX as f32,
-        24 => (1 << 23) as f32,
-        32 => i32::MAX as f32,
-        _ => anyhow::bail!("Unsupported bit depth: {} bits", spec.bits_per_sample),
-    };
+    let probed = get_probe().format(
+        &hint,
+        mss,
+        &FormatOptions::default(),
+        &MetadataOptions::default(),
+    )?;
 
-    let num_channels = spec.channels;
+    let mut format = probed.format;
+    let track = format.default_track().context("No default track found")?;
 
-    let samples = match spec.bits_per_sample {
-        16 => reader
-            .samples::<i16>()
-            .map(|s| s.map(|v| v as f32 / norm_factor))
-            .collect::<Result<Vec<_>, _>>()?,
-        24 | 32 => {
-            anyhow::bail!("24- and 32-bit WAV files are not currently supported")
-        }
-        _ => anyhow::bail!("Unsupported bit depth"),
-    };
+    let mut decoder = get_codecs().make(&track.codec_params, &DecoderOptions::default())?;
 
-    if num_channels == 1 {
-        Ok(samples)
-    } else if num_channels == 2 {
-        let mono_samples: Vec<f32> = samples
-            .chunks(2)
-            .map(|chunk| (chunk[0] + chunk[1]) / 2.0)
-            .collect();
-        Ok(mono_samples)
-    } else {
-        anyhow::bail!("Unsupported number of channels: {}", num_channels);
+    let mut samples: Vec<f32> = Vec::new();
+    let mut sample_rate: u32 = 0;
+    let mut channels: u16 = 0;
+
+    while let Ok(packet) = format.next_packet() {
+        let decoded = decoder.decode(&packet)?;
+        sample_rate = decoded.spec().rate;
+        channels = decoded.spec().channels.count() as u16;
+
+        let mut buffer = SampleBuffer::<f32>::new(decoded.capacity() as u64, *decoded.spec());
+        buffer.copy_interleaved_ref(decoded);
+
+        samples.extend_from_slice(buffer.samples());
     }
+
+    Ok(AudioData {
+        samples,
+        sample_rate,
+        channels,
+    })
+}
+
+pub fn write_audio(path: &str, audio: &AudioData) -> Result<()> {
+    let spec = hound::WavSpec {
+        channels: audio.channels,
+        sample_rate: audio.sample_rate,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+
+    let mut writer = WavWriter::create(path, spec)?;
+    for sample in &audio.samples {
+        let s = (sample * i16::MAX as f32).clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+        writer.write_sample(s)?;
+    }
+
+    writer.finalize()?;
+    Ok(())
 }

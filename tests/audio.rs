@@ -1,17 +1,36 @@
 use std::path::Path;
-use stem_splitter_core::read_wav_mono;
+use stem_splitter_core::{read_audio, write_audio};
 
 #[test]
-fn test_read_wav_file() {
-    let path = "assets/test.wav";
-    assert!(Path::new(path).exists(), "Missing test file: {}", path);
+fn test_read_and_write_audio() {
+    let input_path = "assets/test.wav";
+    let output_path = "assets/test_output.wav";
 
-    let samples = read_wav_mono(path).expect("Failed to read audio");
-    assert!(!samples.is_empty(), "Read 0 samples");
+    assert!(
+        Path::new(input_path).exists(),
+        "Test input WAV file missing"
+    );
+
+    let audio = read_audio(input_path).expect("Failed to read audio file");
+    assert!(!audio.samples.is_empty(), "No samples read");
+    assert!(audio.sample_rate > 0, "Invalid sample rate");
 
     println!(
-        "Read {} samples. First sample: {:?}",
-        samples.len(),
-        samples[0]
+        "Read {} samples @ {}Hz from {}",
+        audio.samples.len(),
+        audio.sample_rate,
+        input_path
     );
+
+    write_audio(output_path, &audio).expect("Failed to write audio file");
+
+    assert!(
+        Path::new(output_path).exists(),
+        "Output file was not written"
+    );
+
+    let reread = read_audio(output_path).expect("Failed to re-read written file");
+    assert_eq!(reread.sample_rate, audio.sample_rate);
+    assert_eq!(reread.channels, audio.channels);
+    assert_eq!(reread.samples.len(), audio.samples.len());
 }
