@@ -1,21 +1,16 @@
-// tests/pipeline.rs
-
 use std::path::Path;
-use stem_splitter_core::split_file;
+use stem_splitter_core::{split_file, SplitConfig};
 
 #[test]
-fn test_split_file_pipeline_mock() {
+fn test_split_file_pipeline_and_stem_output() {
     let input_path = "assets/test.wav";
+    assert!(Path::new(input_path).exists(), "Test audio file is missing");
 
-    assert!(
-        Path::new(input_path).exists(),
-        "Test audio file is missing: {}",
-        input_path
-    );
+    let config = SplitConfig::default()
+        .model("mock-demucs")
+        .output_dir("assets");
 
-    let model_name = "mock-demucs";
-
-    let result = split_file(input_path, model_name).expect("Pipeline split_file failed");
+    let result = split_file(input_path, config).expect("Pipeline failed");
 
     let total_len =
         result.vocals.len() + result.drums.len() + result.bass.len() + result.other.len();
@@ -29,4 +24,16 @@ fn test_split_file_pipeline_mock() {
         result.bass.len(),
         result.other.len()
     );
+
+    let stem_base = "assets/test";
+    for name in ["vocals", "drums", "bass", "other"] {
+        let path = format!("{}_{}.wav", stem_base, name);
+        assert!(
+            Path::new(&path).exists(),
+            "Stem file was not written: {}",
+            path
+        );
+    }
+
+    println!("✅ All stem files written successfully");
 }

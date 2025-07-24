@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::Path;
 use stem_splitter_core::{read_audio, write_audio};
 
@@ -33,4 +34,6 @@ fn test_read_and_write_audio() {
     assert_eq!(reread.sample_rate, audio.sample_rate);
     assert_eq!(reread.channels, audio.channels);
     assert_eq!(reread.samples.len(), audio.samples.len());
+
+    fs::remove_file(output_path).expect("Failed to delete test output");
 }

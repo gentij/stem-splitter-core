@@ -10,8 +10,5 @@ mod types;
 
 pub use crate::{
     pipeline::split_file,
-    types::{StemResult, StemSplitter, StemSplitterConfig},
+    types::{SplitConfig, StemResult},
 };
-
-#[cfg(test)]
-pub use crate::audio::{read_audio, write_audio};
