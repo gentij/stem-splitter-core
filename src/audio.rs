@@ -1,5 +1,5 @@
-use anyhow::Result;
-use hound::WavReader;
+use anyhow::{Context, Result};
+use hound::{SampleFormat, WavReader};
 
 pub fn read_wav_mono(path: &str) -> Result<Vec<f32>> {
     let mut reader =
@@ -34,11 +34,11 @@ pub fn read_wav_mono(path: &str) -> Result<Vec<f32>> {
     if num_channels == 1 {
         Ok(samples)
     } else if num_channels == 2 {
-        let mono_samples = samples
-            .chunk(2)
+        let mono_samples: Vec<f32> = samples
+            .chunks(2)
             .map(|chunk| (chunk[0] + chunk[1]) / 2.0)
             .collect();
-        Ok(samples)
+        Ok(mono_samples)
     } else {
         anyhow::bail!("Unsupported number of channels: {}", num_channels);
     }
