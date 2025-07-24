@@ -79,3 +79,14 @@ pub fn write_audio(path: &str, audio: &AudioData) -> Result<()> {
     writer.finalize()?;
     Ok(())
 }
+
+pub fn downmix_to_mono(samples: &[f32], channels: u16) -> Vec<f32> {
+    if channels == 1 {
+        return samples.to_vec();
+    }
+
+    samples
+        .chunks(channels as usize)
+        .map(|chunk| chunk.iter().copied().sum::<f32>() / channels as f32)
+        .collect()
+}

@@ -9,8 +9,9 @@ mod pipeline;
 mod types;
 
 pub use crate::{
-    audio::{read_audio, write_audio},
-    model::{DummyModel, StemModel},
     pipeline::split_file,
     types::{StemResult, StemSplitter, StemSplitterConfig},
 };
+
+#[cfg(test)]
+pub use crate::audio::{read_audio, write_audio};
