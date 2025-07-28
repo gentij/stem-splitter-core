@@ -1,6 +1,6 @@
 use crate::{
-    audio::{downmix_to_mono, read_audio, write_audio},
-    model::{OnnxModel, StemModel},
+    audio::{read_audio, write_audio},
+    model::{PythonModel, StemModel},
     types::{AudioData, SplitConfig, StemResult},
 };
 use anyhow::{Context, Result};
@@ -9,13 +9,12 @@ use std::path::{Path, PathBuf};
 pub fn split_file(path: &str, config: SplitConfig) -> Result<StemResult> {
     std::fs::metadata(path).with_context(|| format!("File does not exist: {}", path))?;
 
-    let model = OnnxModel::new(&config.model_name);
+    let model = PythonModel::new();
 
     let audio = read_audio(path)?;
-    let mono = downmix_to_mono(&audio.samples, audio.channels);
-
+    let tmp_output_dir = PathBuf::from("./tmp");
     let result = model
-        .separate(&mono)
+        .separate(&audio.samples, &tmp_output_dir)
         .with_context(|| format!("Failed to separate stems for file: {}", path))?;
 
     let file_stem = Path::new(path)

@@ -6,9 +6,7 @@ fn test_split_file_pipeline_and_stem_output() {
     let input_path = "assets/test.wav";
     assert!(Path::new(input_path).exists(), "Test audio file is missing");
 
-    let config = SplitConfig::default()
-        .model("mock-demucs")
-        .output_dir("assets");
+    let config = SplitConfig::default().output_dir("output");
 
     let result = split_file(input_path, config).expect("Pipeline failed");
 
@@ -25,7 +23,7 @@ fn test_split_file_pipeline_and_stem_output() {
         result.other.len()
     );
 
-    let stem_base = "assets/test";
+    let stem_base = "output/test";
     for name in ["vocals", "drums", "bass", "other"] {
         let path = format!("{}_{}.wav", stem_base, name);
         assert!(

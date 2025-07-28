@@ -20,3 +20,4 @@ rubato = "0.12"
 ndarray = "0.15"    
 anyhow = "1"        
 symphonia = { version = "0.5", features = ["mp3", "wav"] }
+tempfile = "3.8"
