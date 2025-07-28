@@ -17,14 +17,16 @@ output_dir.mkdir(parents=True, exist_ok=True)
 
 print(f"🔍 Loading audio from {input_path}")
 try:
-    waveform, sr = torchaudio.load(input_path)
+    waveform, sr = torchaudio.load(str(input_path))
 except Exception as e:
     print(f"❌ Failed to load audio: {e}")
     sys.exit(1)
-
+print(f"🎧 Loaded sample rate: {sr}")
 if sr != 44100:
-    print(f"⚠️ Sample rate is {sr}, but Demucs expects 44100 Hz.")
-    sys.exit(1)
+    print(f"⚠️ Resampling from {sr} Hz to 44100 Hz")
+    resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=44100)
+    waveform = resampler(waveform)
+
 
 print("📦 Loading Demucs model...")
 model = get_model(name="htdemucs").cpu()

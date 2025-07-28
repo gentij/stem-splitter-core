@@ -7,7 +7,7 @@ use std::{
     process::Command,
 };
 pub trait StemModel {
-    fn separate(&self, input: &[f32], output_dir: &Path) -> Result<StemResult>;
+    fn separate(&self, input: &[f32], channels: u16, output_dir: &Path) -> Result<StemResult>;
 }
 
 pub struct PythonModel;
@@ -19,20 +19,28 @@ impl PythonModel {
 }
 
 impl StemModel for PythonModel {
-    fn separate(&self, input: &[f32], output_dir: &Path) -> Result<StemResult> {
+    fn separate(&self, input: &[f32], channels: u16, output_dir: &Path) -> Result<StemResult> {
         fs::create_dir_all(output_dir)?;
 
         let input_wav = output_dir.join("input.wav");
 
-        let stereo_samples: Vec<f32> = input
-            .iter()
-            .flat_map(|s| std::iter::repeat(*s).take(2))
-            .collect();
+        // Only duplicate samples if mono
+        let (final_samples, final_channels): (Vec<f32>, u16) = if channels == 1 {
+            (
+                input
+                    .iter()
+                    .flat_map(|s| std::iter::repeat(*s).take(2))
+                    .collect(),
+                2,
+            )
+        } else {
+            (input.to_vec(), channels)
+        };
 
         let input_audio = AudioData {
-            samples: stereo_samples,
+            samples: final_samples,
             sample_rate: 44100,
-            channels: 2,
+            channels: final_channels,
         };
 
         println!("🔍 Wrote input WAV to: {}", input_wav.display());
@@ -72,3 +80,4 @@ impl StemModel for PythonModel {
         })
     }
 }
+

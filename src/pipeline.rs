@@ -14,7 +14,7 @@ pub fn split_file(path: &str, config: SplitConfig) -> Result<StemResult> {
     let audio = read_audio(path)?;
     let tmp_output_dir = PathBuf::from("./tmp");
     let result = model
-        .separate(&audio.samples, &tmp_output_dir)
+        .separate(&audio.samples, audio.channels, &tmp_output_dir)
         .with_context(|| format!("Failed to separate stems for file: {}", path))?;
 
     let file_stem = Path::new(path)

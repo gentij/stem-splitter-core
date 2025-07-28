@@ -51,6 +51,13 @@ pub fn read_audio<P: AsRef<Path>>(path: P) -> Result<AudioData> {
         samples.extend_from_slice(buffer.samples());
     }
 
+    println!(
+        "🎧 Read audio: sample_rate={}, channels={}, samples={}",
+        sample_rate,
+        channels,
+        samples.len()
+    );
+
     Ok(AudioData {
         samples,
         sample_rate,
