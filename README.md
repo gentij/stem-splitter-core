@@ -64,38 +64,35 @@ python3 --version
 
 ---
 
-### 2. ✅ Install Python Requirements
+### 2. ✅ Install Python Dependencies
 
-Create and activate a virtual environment (recommended):
+You need to install the following Python packages:
+
+```bash
+pip install demucs torch torchaudio
+```
+
+Optionally, you can use a virtual environment:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-```
-
-Install required dependencies:
-
-```bash
-pip install -r requirements.txt
-```
-
-Your `requirements.txt` might look like:
-
-```
-demucs>=4.0.0
+pip install demucs torch torchaudio
 ```
 
 ---
 
 ### 3. ✅ Python Script Setup
 
-Ensure there's a Python script (`demucs_runner.py`) in your project root, or specify a custom path with an environment variable:
+By default, this crate uses a Python script named `demucs_runner.py` located at the root of the project.
+
+If you wish to override it with your own script, set the `STEM_SPLITTER_PYTHON_SCRIPT` environment variable to point to your custom script:
 
 ```bash
-export STEM_SPLITTER_PYTHON_SCRIPT=./scripts/demucs_runner.py
+export STEM_SPLITTER_PYTHON_SCRIPT=./scripts/your_custom_script.py
 ```
 
-The script should:
+The script must:
 
 - Accept `--input` and `--output` arguments
 - Use Demucs (or another model) to process the audio file
@@ -133,21 +130,7 @@ Other formats (like `.flac`, `.ogg`, etc.) may work depending on `symphonia` bac
 - ✅ Python subprocess integration
 - ✅ WAV stem writing
 - ✅ Mono/stereo support
-- 🟡 Model abstraction via trait (`StemModel`)
 - 🛠️ Extensible architecture for custom inference backends
-
----
-
-## 🛣️ Roadmap
-
-- [x] Support MP3/WAV input formats
-- [x] Read/write WAV stems
-- [x] Python subprocess for AI inference
-- [ ] Add native ONNX/Demucs support in Rust (no Python dependency)
-- [ ] Add FLAC/OGG/other input support
-- [ ] Enable real-time streaming inference
-- [ ] Add CLI and Tauri GUI
-- [ ] Publish to crates.io
 
 ---
 
