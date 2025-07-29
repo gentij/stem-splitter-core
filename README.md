@@ -1,19 +1,29 @@
 # Stem Splitter Core
 
-A Rust library for AI-powered audio stem separation.
+A Rust library for high-quality, AI-powered audio stem separation.
 
-## Overview
+---
 
-This crate provides the core functionality for separating audio tracks into individual stems (vocals, drums, bass, etc.) using machine learning models. It's designed to be the foundation for audio stem separation applications.
+## 🎧 Overview
 
-## Features
+`stem-splitter-core` provides the core functionality for splitting full audio tracks into individual stems such as vocals, drums, bass, and other instruments. It's designed to serve as the foundational backend for music production tools, remix apps, or DJ software.
 
-- 🎵 **Audio Stem Separation**: Split audio tracks into individual components
-- 🤖 **AI-Powered**: Uses machine learning models for high-quality separation
-- ⚡ **Fast**: Built with Rust for performance
-- 🔧 **Configurable**: Flexible configuration options for different use cases
+Behind the scenes, it uses external machine learning models (like [Demucs](https://github.com/facebookresearch/demucs)) to perform the separation locally on the user's machine.
 
-## Installation
+---
+
+## 🚀 Features
+
+- 🎵 **Audio Stem Separation** — Split full tracks into vocals, drums, bass, and more  
+- 🧠 **AI-Powered** — Uses external models like Demucs (via Python) for state-of-the-art quality  
+- ⚡ **Fast + Safe** — Built in Rust with strong safety guarantees and performance  
+- 🎚️ **Mono & Stereo Input** — Supports mono and stereo WAV/MP3 files  
+- 🛠️ **Pluggable Backends** — Trait-based model interface allows future integration of native or other AI inference engines  
+- 📂 **Output as WAV** — Results are saved in `.wav` format for easy post-processing  
+
+---
+
+## 📦 Installation
 
 Add this to your `Cargo.toml`:
 
@@ -22,45 +32,136 @@ Add this to your `Cargo.toml`:
 stem-splitter-core = "0.1.0"
 ```
 
-## Quick Start
+> ⚠️ This crate depends on Python and external AI models. See [Setup](#-setup) for details.
+
+---
+
+## ⚡ Quick Start
 
 ```rust
-use stem_splitter_core::{StemSplitter, StemSplitterConfig};
+use stem_splitter_core::{split_file, SplitConfig};
 
-// Create a stem splitter with default configuration
-let splitter = StemSplitter::new();
+let result = split_file("example.mp3", SplitConfig {
+    output_dir: "./output".to_string(),
+}).expect("Failed to split stems");
 
-// Or with custom configuration
-let config = StemSplitterConfig {
-    model_type: "demucs".to_string(),
-    quality: 0.9,
-};
-let splitter = StemSplitter::with_config(config);
-
-println!("Stem splitter ready: {:?}", splitter);
+println!("Vocals: {} samples", result.vocals.len());
 ```
 
-## Development Status
+---
 
-🚧 **This is an early development version.** The actual stem separation functionality is still being implemented. Currently, this crate provides the basic structure and API that will be expanded upon.
+## 🧰 Setup
 
-## Roadmap
+To use this crate, you must install:
 
-- [ ] Audio file loading and processing
-- [ ] Integration with AI models (Demucs, Spleeter)
-- [ ] Multiple output formats support
-- [ ] Real-time processing capabilities
-- [ ] Advanced configuration options
+### 1. ✅ Python 3.8+
 
-## Contributing
+Ensure Python is installed and accessible:
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+```bash
+python3 --version
+```
 
-## License
+---
 
-This project is licensed under either of
+### 2. ✅ Install Python Requirements
 
-- Apache License, Version 2.0, ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
-- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+Create and activate a virtual environment (recommended):
 
-at your option.
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+Install required dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+Your `requirements.txt` might look like:
+
+```
+demucs>=4.0.0
+```
+
+---
+
+### 3. ✅ Python Script Setup
+
+Ensure there's a Python script (`demucs_runner.py`) in your project root, or specify a custom path with an environment variable:
+
+```bash
+export STEM_SPLITTER_PYTHON_SCRIPT=./scripts/demucs_runner.py
+```
+
+The script should:
+
+- Accept `--input` and `--output` arguments
+- Use Demucs (or another model) to process the audio file
+- Save 4 WAV files: `vocals.wav`, `drums.wav`, `bass.wav`, and `other.wav` in the specified output directory
+
+Basic stub example:
+
+```python
+# demucs_runner.py
+import argparse
+import subprocess
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--input", required=True)
+parser.add_argument("--output", required=True)
+args = parser.parse_args()
+
+subprocess.run(["demucs", "--two-stems=vocals", args.input, "-o", args.output])
+```
+
+---
+
+## 📁 Supported Input Formats
+
+- `.wav`
+- `.mp3`
+
+Other formats (like `.flac`, `.ogg`, etc.) may work depending on `symphonia` backend support.
+
+---
+
+## 🧪 Development Status
+
+- ✅ MP3/WAV input decoding
+- ✅ Python subprocess integration
+- ✅ WAV stem writing
+- ✅ Mono/stereo support
+- 🟡 Model abstraction via trait (`StemModel`)
+- 🛠️ Extensible architecture for custom inference backends
+
+---
+
+## 🛣️ Roadmap
+
+- [x] Support MP3/WAV input formats
+- [x] Read/write WAV stems
+- [x] Python subprocess for AI inference
+- [ ] Add native ONNX/Demucs support in Rust (no Python dependency)
+- [ ] Add FLAC/OGG/other input support
+- [ ] Enable real-time streaming inference
+- [ ] Add CLI and Tauri GUI
+- [ ] Publish to crates.io
+
+---
+
+## 🤝 Contributing
+
+Contributions are welcome! If you have suggestions, issues, or feature requests, feel free to open an issue or submit a pull request.
+
+---
+
+## 🪪 License
+
+Licensed under either of:
+
+- MIT ([LICENSE-MIT](LICENSE-MIT))
+- Apache 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+
+At your option.
