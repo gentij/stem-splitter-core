@@ -1,11 +1,7 @@
 use crate::audio::{read_audio, write_audio};
 use crate::types::{AudioData, StemResult};
 use anyhow::{Context, Result};
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    process::Command,
-};
+use std::{fs, path::Path, process::Command};
 pub trait StemModel {
     fn separate(&self, input: &[f32], channels: u16, output_dir: &Path) -> Result<StemResult>;
 }
@@ -80,4 +76,3 @@ impl StemModel for PythonModel {
         })
     }
 }
-
