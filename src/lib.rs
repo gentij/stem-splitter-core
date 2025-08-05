@@ -7,6 +7,7 @@ mod audio;
 mod model;
 mod pipeline;
 mod types;
+mod utils;
 
 pub use crate::{
     audio::{read_audio, write_audio},

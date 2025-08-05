@@ -1,3 +1,4 @@
+use crate::utils::tmp_dir;
 use crate::{
     audio::{read_audio, write_audio},
     model::{PythonModel, StemModel},
@@ -12,7 +13,7 @@ pub fn split_file(path: &str, config: SplitConfig) -> Result<StemResult> {
     let model = PythonModel::new();
 
     let audio = read_audio(path)?;
-    let tmp_output_dir = PathBuf::from("./tmp");
+    let tmp_output_dir = tmp_dir();
     let result = model
         .separate(&audio.samples, audio.channels, &tmp_output_dir)
         .with_context(|| format!("Failed to separate stems for file: {}", path))?;

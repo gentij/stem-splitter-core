@@ -1,7 +1,9 @@
 use crate::audio::{read_audio, write_audio};
 use crate::types::{AudioData, StemResult};
+use crate::utils::script_path;
 use anyhow::{Context, Result};
 use std::{fs, path::Path, process::Command};
+
 pub trait StemModel {
     fn separate(&self, input: &[f32], channels: u16, output_dir: &Path) -> Result<StemResult>;
 }
@@ -45,8 +47,7 @@ impl StemModel for PythonModel {
         write_audio(input_wav.to_str().unwrap(), &input_audio)?;
 
         // Path to Python script
-        let script = std::env::var("STEM_SPLITTER_PYTHON_SCRIPT")
-            .unwrap_or_else(|_| "demucs_runner.py".to_string());
+        let script = script_path();
 
         // Run Python stem separation
         let status = Command::new("python3")
