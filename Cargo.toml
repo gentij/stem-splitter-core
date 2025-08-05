@@ -1,6 +1,6 @@
 [package]
 name = "stem-splitter-core"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Core library for AI-powered audio stem separation"
 license = "MIT OR Apache-2.0"
