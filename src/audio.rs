@@ -1,7 +1,6 @@
 use std::{fs::File, path::Path};
 
 use anyhow::{Context, Result};
-use hound::WavWriter;
 use symphonia::core::{
     audio::SampleBuffer, codecs::DecoderOptions, formats::FormatOptions, io::MediaSourceStream,
     meta::MetadataOptions, probe::Hint,
@@ -66,6 +65,11 @@ pub fn read_audio<P: AsRef<Path>>(path: P) -> Result<AudioData> {
 }
 
 pub fn write_audio(path: &str, audio: &AudioData) -> Result<()> {
+    let path_obj = std::path::Path::new(path);
+    if let Some(parent) = path_obj.parent() {
+        std::fs::create_dir_all(parent)?; // 💡 Ensure directory exists
+    }
+
     let spec = hound::WavSpec {
         channels: audio.channels,
         sample_rate: audio.sample_rate,
@@ -73,7 +77,7 @@ pub fn write_audio(path: &str, audio: &AudioData) -> Result<()> {
         sample_format: hound::SampleFormat::Int,
     };
 
-    let mut writer = WavWriter::create(path, spec)?;
+    let mut writer = hound::WavWriter::create(path, spec)?;
     for sample in &audio.samples {
         let s = (sample * i16::MAX as f32).clamp(i16::MIN as f32, i16::MAX as f32) as i16;
         writer.write_sample(s)?;

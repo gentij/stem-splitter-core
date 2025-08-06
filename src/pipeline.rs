@@ -1,8 +1,8 @@
 use crate::utils::tmp_dir;
 use crate::{
-    audio::{read_audio, write_audio},
+    audio::read_audio,
     model::{PythonModel, StemModel},
-    types::{AudioData, SplitConfig, StemResult},
+    types::{SplitConfig, StemResult},
 };
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
@@ -24,30 +24,33 @@ pub fn split_file(path: &str, config: SplitConfig) -> Result<StemResult> {
         .unwrap_or("output");
 
     let base_path = PathBuf::from(&config.output_dir).join(file_stem);
-    save_stems(&result, base_path.to_str().unwrap(), audio.sample_rate)?;
+    save_stems(base_path.to_str().unwrap())?;
+
+    std::fs::remove_dir_all(&tmp_output_dir).with_context(|| {
+        format!(
+            "Failed to remove tmp directory: {}",
+            tmp_output_dir.display()
+        )
+    })?;
 
     Ok(result)
 }
 
-fn save_stems(result: &StemResult, base_path: &str, sample_rate: u32) -> Result<()> {
-    let make_path = |stem: &str| format!("{base_path}_{stem}.wav");
+fn save_stems(base_path: &str) -> Result<()> {
+    let stem_names = ["vocals", "drums", "bass", "other"];
 
-    let stems = [
-        ("vocals", &result.vocals),
-        ("drums", &result.drums),
-        ("bass", &result.bass),
-        ("other", &result.other),
-    ];
+    // Ensure parent directory of base_path exists
+    if let Some(parent) = Path::new(base_path).parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create output directory: {}", parent.display()))?;
+    }
 
-    for (name, samples) in stems {
-        write_audio(
-            &make_path(name),
-            &AudioData {
-                samples: samples.clone(),
-                sample_rate,
-                channels: 1,
-            },
-        )?;
+    for name in stem_names {
+        let src = Path::new("tmp").join(format!("{name}.wav")); // or your actual tmp_output_dir
+        let dst = format!("{base_path}_{name}.wav");
+
+        std::fs::copy(&src, &dst)
+            .with_context(|| format!("Failed to copy {name} from tmp to output"))?;
     }
 
     Ok(())
