@@ -1,4 +1,4 @@
-use crate::{error::Result, progress::emit_download_progress};
+use crate::{error::Result, io::progress::emit_download_progress};
 use reqwest::blocking::Client;
 use std::{
     fs,

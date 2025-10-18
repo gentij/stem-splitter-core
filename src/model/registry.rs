@@ -13,7 +13,7 @@ pub struct Registry {
     pub models: Vec<RegistryEntry>,
 }
 
-const REGISTRY_JSON: &str = include_str!("../models/registry.json");
+const REGISTRY_JSON: &str = include_str!("../../models/registry.json");
 
 pub fn resolve_manifest_url(model_name: &str) -> Result<String> {
     let reg: Registry = serde_json::from_str(REGISTRY_JSON)?;

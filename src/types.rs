@@ -1,41 +1,33 @@
-#[derive(Debug, Clone)]
-pub struct StemResult {
-    pub vocals: Vec<f32>,
-    pub drums: Vec<f32>,
-    pub bass: Vec<f32>,
-    pub other: Vec<f32>,
-}
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct AudioData {
     pub samples: Vec<f32>,
     pub sample_rate: u32,
     pub channels: u16,
 }
 
-#[derive(Debug, Clone)]
-pub struct SplitConfig {
-    pub model_name: String,
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SplitOptions {
     pub output_dir: String,
+    pub model_name: String,
+    pub manifest_url_override: Option<String>,
 }
 
-impl Default for SplitConfig {
+impl Default for SplitOptions {
     fn default() -> Self {
         Self {
-            model_name: "demucs".to_string(),
-            output_dir: ".".to_string(),
+            output_dir: ".".into(),
+            model_name: "mdx_4stem_v1".into(),
+            manifest_url_override: None,
         }
     }
 }
 
-impl SplitConfig {
-    pub fn model(mut self, name: &str) -> Self {
-        self.model_name = name.to_string();
-        self
-    }
-
-    pub fn output_dir(mut self, dir: &str) -> Self {
-        self.output_dir = dir.to_string();
-        self
-    }
+#[derive(Clone, Debug)]
+pub struct SplitResult {
+    pub vocals_path: String,
+    pub drums_path: String,
+    pub bass_path: String,
+    pub other_path: String,
 }

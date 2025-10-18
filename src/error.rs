@@ -43,4 +43,16 @@ impl From<hex::FromHexError> for StemError {
     }
 }
 
+impl From<ort::Error> for StemError {
+    fn from(e: ort::Error) -> Self {
+        StemError::Anyhow(e.into())
+    }
+}
+
+impl From<ndarray::ShapeError> for StemError {
+    fn from(e: ndarray::ShapeError) -> Self {
+        StemError::Anyhow(e.into())
+    }
+}
+
 pub type Result<T> = std::result::Result<T, StemError>;

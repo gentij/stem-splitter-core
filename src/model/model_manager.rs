@@ -1,10 +1,13 @@
 use crate::{
-    crypto::verify_sha256,
     error::{Result, StemError},
-    net::{download_with_progress, http_client},
-    paths::models_cache_dir,
-    registry::resolve_manifest_url,
+    io::{
+        crypto::verify_sha256,
+        net::{download_with_progress, http_client},
+        paths::models_cache_dir,
+    },
+    model::registry::resolve_manifest_url,
 };
+
 use serde::Deserialize;
 use std::{fs, path::PathBuf};
 
