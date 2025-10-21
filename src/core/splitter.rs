@@ -51,12 +51,14 @@ pub fn split_file(input_path: &str, opts: SplitOptions) -> Result<SplitResult> {
     let tmp = tempdir()?;
     let tmp_dir = tmp.path().to_path_buf();
 
-    let mut left = vec![0f32; win];
-    let mut right = vec![0f32; win];
+    let mut left_raw = vec![0f32; win];
+    let mut right_raw = vec![0f32; win];
     let mut first_pass: Option<(usize, usize)> = None;
 
     let mut pos = 0usize;
+
     while pos < n {
+        // 1) Build raw chunk for the model (no Hann here)
         for i in 0..win {
             let idx = pos + i;
             let (l, r) = if idx < n {
@@ -64,12 +66,12 @@ pub fn split_file(input_path: &str, opts: SplitOptions) -> Result<SplitResult> {
             } else {
                 (0.0, 0.0)
             };
-            let ww = w[i];
-            left[i] = l * ww;
-            right[i] = r * ww;
+            left_raw[i] = l;
+            right_raw[i] = r;
         }
 
-        let out = engine::run_window(&left, &right)?; // [S,2,T]
+        // 2) Inference: [S,2,T] with Demucs runner
+        let out = engine::run_window_demucs(&left_raw, &right_raw)?;
         let (s_count, _, t_out) = (out.shape()[0], out.shape()[1], out.shape()[2]);
 
         if first_pass.is_none() {
@@ -78,6 +80,7 @@ pub fn split_file(input_path: &str, opts: SplitOptions) -> Result<SplitResult> {
             acc = vec![vec![[0f32; 2]; n + win]; stems_count];
         }
 
+        // 3) Overlap-add with Hann^2 weights (your existing scheme)
         for st in 0..stems_count {
             for i in 0..win {
                 let dst = pos + i;

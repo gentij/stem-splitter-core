@@ -23,8 +23,8 @@ pub mod io {
 // Public API
 pub use crate::core::splitter::split_file;
 pub use crate::io::progress::set_download_progress_callback;
-pub use crate::model::model_manager::{ensure_model, ModelHandle, ModelManifest};
-pub use crate::types::{SplitOptions, SplitResult};
+pub use crate::model::model_manager::{ensure_model, ModelHandle};
+pub use crate::types::{ModelManifest, SplitOptions, SplitResult};
 
 pub fn prepare_model(model_name: &str, manifest_url_override: Option<&str>) -> error::Result<()> {
     let handle = ensure_model(model_name, manifest_url_override)?;

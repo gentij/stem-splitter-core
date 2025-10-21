@@ -4,6 +4,10 @@
     {
       "name": "mdx_4stem_v1",
       "manifest": "http://127.0.0.1:8000/mdx_4stem_v1.json"
+    },
+    {
+      "name": "htdemucs_ort_v1",
+      "manifest": "https://huggingface.co/gentij/htdemucs-ort/resolve/main/manifest.json"
     }
   ]
 }

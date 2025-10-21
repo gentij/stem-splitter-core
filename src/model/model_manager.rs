@@ -6,26 +6,10 @@ use crate::{
         paths::models_cache_dir,
     },
     model::registry::resolve_manifest_url,
+    types::ModelManifest,
 };
 
-use serde::Deserialize;
 use std::{fs, path::PathBuf};
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ModelManifest {
-    pub name: String,
-    pub version: String,
-    pub backend: String,
-    pub sample_rate: u32,
-    pub window: usize,
-    pub hop: usize,
-    pub stems: Vec<String>,
-    pub input_layout: String,
-    pub output_layout: String,
-    pub url: String,
-    pub sha256: String,
-    pub filesize: u64,
-}
 
 pub struct ModelHandle {
     pub manifest: ModelManifest,
@@ -33,11 +17,9 @@ pub struct ModelHandle {
 }
 
 pub fn ensure_model(model_name: &str, manifest_url_override: Option<&str>) -> Result<ModelHandle> {
-    let manifest_url = if let Some(url) = manifest_url_override {
-        url.to_string()
-    } else {
-        resolve_manifest_url(model_name)?
-    };
+    let manifest_url = manifest_url_override
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| resolve_manifest_url(model_name).expect("resolve_manifest_url failed"));
 
     let client = http_client();
     let manifest: ModelManifest = client
@@ -46,22 +28,39 @@ pub fn ensure_model(model_name: &str, manifest_url_override: Option<&str>) -> Re
         .error_for_status()?
         .json()?;
 
+    let a = manifest
+        .resolve_primary_artifact()
+        .map_err(|msg| StemError::Manifest(msg))?;
+
     let cache_dir = models_cache_dir()?;
     fs::create_dir_all(&cache_dir)?;
-    let file_name = format!("{}-{}.onnx", manifest.name, &manifest.sha256[..8]);
+    let ext = a
+        .file
+        .rsplit('.')
+        .next()
+        .map(|s| format!(".{s}"))
+        .unwrap_or_default();
+    let file_name = format!("{}-{}{}", manifest.name, &a.sha256[..8], ext);
     let local_path = cache_dir.join(file_name);
 
-    let need_download = match verify_sha256(&local_path, &manifest.sha256) {
-        Ok(true) => false,
-        _ => true,
-    };
-
+    let need_download = !matches!(verify_sha256(&local_path, &a.sha256), Ok(true));
     if need_download {
-        download_with_progress(&client, &manifest.url, &local_path)?;
-        if !verify_sha256(&local_path, &manifest.sha256)? {
+        download_with_progress(&client, &a.url, &local_path)?;
+        if !verify_sha256(&local_path, &a.sha256)? {
             return Err(StemError::Checksum {
                 path: local_path.display().to_string(),
             });
+        }
+        if a.size_bytes > 0 {
+            let size = fs::metadata(&local_path).map(|m| m.len()).unwrap_or(0);
+            if size != a.size_bytes {
+                eprintln!(
+                    "warn: size mismatch for {}, expected {}, got {}",
+                    local_path.display(),
+                    a.size_bytes,
+                    size
+                );
+            }
         }
     }
 

@@ -16,6 +16,9 @@ pub enum StemError {
 
     #[error("Cache dir not available")]
     CacheDirUnavailable,
+
+    #[error("manifest error: {0}")]
+    Manifest(String),
 }
 
 // --- Implement From conversions for common errors ---

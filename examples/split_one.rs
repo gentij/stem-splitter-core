@@ -12,13 +12,15 @@ fn main() -> anyhow::Result<()> {
         eprint!("\rModel: {pct}%");
         if d == t && t > 0 {
             eprintln!();
-        } // newline when done
+        }
     });
 
     let opts = stem_splitter_core::SplitOptions {
         output_dir: out,
-        model_name: "dummy_4stem_tile".into(), // fine to keep
-        manifest_url_override: Some("http://localhost:8000/dummy_4stem_tile.manifest.json".into()),
+        model_name: "htdemucs_ort_v1".into(),
+        manifest_url_override: Some(
+            "https://huggingface.co/gentij/htdemucs-ort/resolve/main/manifest.json".into(),
+        ),
     };
 
     let res = stem_splitter_core::split_file(&input, opts)?;
