@@ -28,3 +28,22 @@ ndarray = "0.15"
 anyhow = "1"        
 symphonia = { version = "0.5", features = ["mp3", "wav"] }
 tempfile = "3.8"
+ort = { version = "2.0.0-rc.10", features = ["download-binaries"] }
+serde = { version="1", features=["derive"] }
+serde_json = "1"
+reqwest = { version="0.12", features=["blocking","json"] }
+sha2 = "0.10"
+hex = "0.4"
+directories = "5"
+thiserror = "1"
+httpmock = "0.7"
+rand = "0.8"
+once_cell = "1.19" 
+rustfft = "6"
+num-complex = "0.4"
+
+[dev-dependencies]
+rand = "0.8"                  # to generate random test data
+httpmock = "0.7"              # to simulate remote manifest/model servers
+tempfile = "3.8"              # also used in tests for isolated dirs
+

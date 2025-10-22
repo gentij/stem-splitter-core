@@ -1,16 +1,33 @@
-//! # stem-splitter-core
-//!
-//! Core audio stem splitting functionality for reading files,
-//! processing them with models, and returning separated stems.
-
-mod audio;
-mod model;
-mod pipeline;
+mod error;
 mod types;
-mod utils;
 
-pub use crate::{
-    audio::{read_audio, write_audio},
-    pipeline::split_file,
-    types::{SplitConfig, StemResult},
-};
+pub mod core {
+    pub mod audio;
+    pub mod dsp;
+    pub mod engine;
+    pub mod splitter;
+}
+
+pub mod model {
+    pub mod model_manager;
+    pub mod registry;
+}
+
+pub mod io {
+    pub mod crypto;
+    pub mod net;
+    pub mod paths;
+    pub mod progress;
+}
+
+// Public API
+pub use crate::core::splitter::split_file;
+pub use crate::io::progress::set_download_progress_callback;
+pub use crate::model::model_manager::{ensure_model, ModelHandle};
+pub use crate::types::{ModelManifest, SplitOptions, SplitResult};
+
+pub fn prepare_model(model_name: &str, manifest_url_override: Option<&str>) -> error::Result<()> {
+    let handle = ensure_model(model_name, manifest_url_override)?;
+    crate::core::engine::preload(&handle)?;
+    Ok(())
+}
