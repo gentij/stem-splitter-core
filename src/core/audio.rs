@@ -67,7 +67,7 @@ pub fn read_audio<P: AsRef<Path>>(path: P) -> Result<AudioData> {
 pub fn write_audio(path: &str, audio: &AudioData) -> Result<()> {
     let path_obj = std::path::Path::new(path);
     if let Some(parent) = path_obj.parent() {
-        std::fs::create_dir_all(parent)?; // 💡 Ensure directory exists
+        std::fs::create_dir_all(parent)?;
     }
 
     let spec = hound::WavSpec {
@@ -86,14 +86,3 @@ pub fn write_audio(path: &str, audio: &AudioData) -> Result<()> {
     writer.finalize()?;
     Ok(())
 }
-
-// pub fn downmix_to_mono(samples: &[f32], channels: u16) -> Vec<f32> {
-//     if channels == 1 {
-//         return samples.to_vec();
-//     }
-
-//     samples
-//         .chunks(channels as usize)
-//         .map(|chunk| chunk.iter().copied().sum::<f32>() / channels as f32)
-//         .collect()
-// }

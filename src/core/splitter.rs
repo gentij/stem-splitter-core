@@ -1,19 +1,11 @@
 use crate::{
-    core::{
-        audio::{read_audio, write_audio},
-        dsp::{hann2, to_planar_stereo},
-        engine,
-    },
+    core::{audio::{read_audio, write_audio}, dsp::to_planar_stereo, engine},
     error::Result,
     model::model_manager::ensure_model,
     types::{AudioData, SplitOptions, SplitResult},
 };
 
-use std::{
-    collections::HashMap,
-    fs,
-    path::{Path, PathBuf},
-};
+use std::{collections::HashMap, fs, path::{Path, PathBuf}};
 use tempfile::tempdir;
 
 pub fn split_file(input_path: &str, opts: SplitOptions) -> Result<SplitResult> {
@@ -41,66 +33,51 @@ pub fn split_file(input_path: &str, opts: SplitOptions) -> Result<SplitResult> {
         return Err(anyhow::anyhow!("Bad win/hop in manifest").into());
     }
 
-    let w = hann2(win);
-
     let stems_names = mf.stems.clone();
     let mut stems_count = stems_names.len().max(1);
-    let mut acc: Vec<Vec<[f32; 2]>> = Vec::new();
-    let mut wsum = vec![0f32; n + win];
 
     let tmp = tempdir()?;
     let tmp_dir = tmp.path().to_path_buf();
 
     let mut left_raw = vec![0f32; win];
     let mut right_raw = vec![0f32; win];
-    let mut first_pass: Option<(usize, usize)> = None;
+    
+    // Accumulator for each stem - no windowing needed since model outputs are already processed
+    let mut acc: Vec<Vec<[f32; 2]>> = Vec::new();
 
     let mut pos = 0usize;
+    let mut first_chunk = true;
 
     while pos < n {
-        // 1) Build raw chunk for the model (no Hann here)
+        // Extract audio chunk
         for i in 0..win {
             let idx = pos + i;
-            let (l, r) = if idx < n {
-                (stereo[idx][0], stereo[idx][1])
+            if idx < n {
+                left_raw[i] = stereo[idx][0];
+                right_raw[i] = stereo[idx][1];
             } else {
-                (0.0, 0.0)
-            };
-            left_raw[i] = l;
-            right_raw[i] = r;
+                left_raw[i] = 0.0;
+                right_raw[i] = 0.0;
+            }
         }
 
-        // 2) Inference: [S,2,T] with Demucs runner
+        // Run inference - model already handles windowing internally
         let out = engine::run_window_demucs(&left_raw, &right_raw)?;
         let (s_count, _, t_out) = (out.shape()[0], out.shape()[1], out.shape()[2]);
 
-        if first_pass.is_none() {
-            first_pass = Some((s_count, t_out));
+        if first_chunk {
             stems_count = s_count;
-            acc = vec![vec![[0f32; 2]; n + win]; stems_count];
+            acc = vec![vec![[0f32; 2]; n]; stems_count];
+            first_chunk = false;
         }
 
-        // 3) Overlap-add with Hann^2 weights (your existing scheme)
+        // Simply copy the output - no additional windowing
+        let copy_len = t_out.min(win).min(n - pos);
         for st in 0..stems_count {
-            for i in 0..win {
-                let dst = pos + i;
-                if dst >= acc[st].len() {
-                    break;
-                }
-                let ww = w[i];
-                if i < t_out {
-                    acc[st][dst][0] += out[(st, 0, i)] * ww;
-                    acc[st][dst][1] += out[(st, 1, i)] * ww;
-                }
+            for i in 0..copy_len {
+                acc[st][pos + i][0] = out[(st, 0, i)];
+                acc[st][pos + i][1] = out[(st, 1, i)];
             }
-        }
-        for i in 0..win {
-            let dst = pos + i;
-            if dst >= wsum.len() {
-                break;
-            }
-            let ww = w[i];
-            wsum[dst] += ww * ww;
         }
 
         if pos + hop >= n {
@@ -109,36 +86,24 @@ pub fn split_file(input_path: &str, opts: SplitOptions) -> Result<SplitResult> {
         pos += hop;
     }
 
-    for i in 0..n {
-        let d = wsum[i].max(1e-8);
-        for st in 0..stems_count {
-            acc[st][i][0] /= d;
-            acc[st][i][1] /= d;
-        }
-    }
-
     let names = if stems_names.is_empty() {
-        vec![
-            "vocals".into(),
-            "drums".into(),
-            "bass".into(),
-            "other".into(),
-        ]
+        vec!["vocals".into(), "drums".into(), "bass".into(), "other".into()]
     } else {
         stems_names
     };
+    
     let mut name_idx: HashMap<String, usize> = HashMap::new();
-    for (i, n) in names.iter().enumerate() {
-        name_idx.insert(n.to_lowercase(), i);
+    for (i, name) in names.iter().enumerate() {
+        name_idx.insert(name.to_lowercase(), i);
     }
 
     fs::create_dir_all(&opts.output_dir)?;
 
     let stem_to_wav = |st: usize, base: &str| -> Result<String> {
-        let mut inter = Vec::<f32>::with_capacity(n * 2);
-        for i in 0..n {
-            inter.push(acc[st][i][0]);
-            inter.push(acc[st][i][1]);
+        let mut inter = Vec::with_capacity(n * 2);
+        for sample in &acc[st][..n] {
+            inter.push(sample[0]);
+            inter.push(sample[1]);
         }
         let data = AudioData {
             samples: inter,
