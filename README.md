@@ -40,7 +40,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-stem-splitter-core = "0.1"
+stem-splitter-core = "1.0.0"
 ```
 
 ### System Requirements

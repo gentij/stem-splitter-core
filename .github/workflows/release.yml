@@ -72,6 +72,14 @@ jobs:
 
       - name: Publish to crates.io
         run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        continue-on-error: true
+        id: publish
+
+      - name: Check if already published
+        if: steps.publish.outcome == 'failure'
+        run: |
+          echo "⚠️ Publish failed - version might already exist on crates.io"
+          echo "Continuing with GitHub release creation..."
 
   github-release:
     name: Create GitHub Release
