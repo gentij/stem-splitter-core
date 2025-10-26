@@ -23,6 +23,8 @@ pub fn download_with_progress(client: &Client, url: &str, dest: &Path) -> Result
 
     let total = resp.content_length().unwrap_or(0);
 
+    emit_download_progress(0, total);
+
     let mut file = File::create(&tmp)?;
     let mut downloaded: u64 = 0;
     let mut buf = [0u8; 64 * 1024];
@@ -40,6 +42,10 @@ pub fn download_with_progress(client: &Client, url: &str, dest: &Path) -> Result
     if dest.exists() {
         fs::remove_file(dest).ok();
     }
+
     fs::rename(&tmp, dest)?;
+
+    emit_download_progress(total.max(downloaded), total.max(downloaded));
+
     Ok(())
 }

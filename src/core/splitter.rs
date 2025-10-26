@@ -1,15 +1,27 @@
 use crate::{
-    core::{audio::{read_audio, write_audio}, dsp::to_planar_stereo, engine},
+    core::{
+        audio::{read_audio, write_audio},
+        dsp::to_planar_stereo,
+        engine,
+    },
     error::Result,
+    io::progress::{emit_split_progress, SplitProgress},
     model::model_manager::ensure_model,
     types::{AudioData, SplitOptions, SplitResult},
 };
 
-use std::{collections::HashMap, fs, path::{Path, PathBuf}};
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+};
 use tempfile::tempdir;
 
 pub fn split_file(input_path: &str, opts: SplitOptions) -> Result<SplitResult> {
+    emit_split_progress(SplitProgress::Stage("resolve_model"));
     let handle = ensure_model(&opts.model_name, opts.manifest_url_override.as_deref())?;
+
+    emit_split_progress(SplitProgress::Stage("engine_preload"));
     engine::preload(&handle)?;
 
     let mf = engine::manifest();
@@ -18,6 +30,7 @@ pub fn split_file(input_path: &str, opts: SplitOptions) -> Result<SplitResult> {
         return Err(anyhow::anyhow!("Currently expecting 44.1k model").into());
     }
 
+    emit_split_progress(SplitProgress::Stage("read_audio"));
     let audio = read_audio(input_path)?;
     let stereo = to_planar_stereo(&audio.samples, audio.channels);
     let n = stereo.len();
@@ -41,13 +54,14 @@ pub fn split_file(input_path: &str, opts: SplitOptions) -> Result<SplitResult> {
 
     let mut left_raw = vec![0f32; win];
     let mut right_raw = vec![0f32; win];
-    
+
     // Accumulator for each stem - no windowing needed since model outputs are already processed
     let mut acc: Vec<Vec<[f32; 2]>> = Vec::new();
 
     let mut pos = 0usize;
     let mut first_chunk = true;
 
+    emit_split_progress(SplitProgress::Stage("infer"));
     while pos < n {
         // Extract audio chunk
         for i in 0..win {
@@ -87,11 +101,16 @@ pub fn split_file(input_path: &str, opts: SplitOptions) -> Result<SplitResult> {
     }
 
     let names = if stems_names.is_empty() {
-        vec!["vocals".into(), "drums".into(), "bass".into(), "other".into()]
+        vec![
+            "vocals".into(),
+            "drums".into(),
+            "bass".into(),
+            "other".into(),
+        ]
     } else {
         stems_names
     };
-    
+
     let mut name_idx: HashMap<String, usize> = HashMap::new();
     for (i, name) in names.iter().enumerate() {
         name_idx.insert(name.to_lowercase(), i);
@@ -99,19 +118,31 @@ pub fn split_file(input_path: &str, opts: SplitOptions) -> Result<SplitResult> {
 
     fs::create_dir_all(&opts.output_dir)?;
 
+    emit_split_progress(SplitProgress::Stage("write_stems"));
     let stem_to_wav = |st: usize, base: &str| -> Result<String> {
         let mut inter = Vec::with_capacity(n * 2);
+
         for sample in &acc[st][..n] {
             inter.push(sample[0]);
             inter.push(sample[1]);
         }
+
+        emit_split_progress(SplitProgress::Writing {
+            stem: base.to_string(),
+            done: n,
+            total: n,
+            percent: 100.0,
+        });
+
         let data = AudioData {
             samples: inter,
             sample_rate: mf.sample_rate,
             channels: 2,
         };
+
         let p = tmp_dir.join(format!("{base}.wav"));
         write_audio(p.to_str().unwrap(), &data)?;
+
         Ok(p.to_string_lossy().into())
     };
 
@@ -127,6 +158,8 @@ pub fn split_file(input_path: &str, opts: SplitOptions) -> Result<SplitResult> {
     let b_path = stem_to_wav(get_idx("bass", 2), "bass")?;
     let o_path = stem_to_wav(get_idx("other", 3), "other")?;
 
+    emit_split_progress(SplitProgress::Stage("finalize"));
+
     let file_stem = Path::new(input_path)
         .file_stem()
         .and_then(|s| s.to_str())
@@ -137,6 +170,8 @@ pub fn split_file(input_path: &str, opts: SplitOptions) -> Result<SplitResult> {
     let drums_out = copy_to(&d_path, &format!("{}_drums.wav", base.to_string_lossy()))?;
     let bass_out = copy_to(&b_path, &format!("{}_bass.wav", base.to_string_lossy()))?;
     let other_out = copy_to(&o_path, &format!("{}_other.wav", base.to_string_lossy()))?;
+
+    emit_split_progress(SplitProgress::Finished);
 
     Ok(SplitResult {
         vocals_path: vocals_out,

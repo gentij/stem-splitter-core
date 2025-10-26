@@ -5,16 +5,26 @@ fn main() -> anyhow::Result<()> {
         } else {
             0
         };
-        eprint!("\rDownloading model… {}% ({}/{} bytes)", pct, done, total);
+
+        if total > 0 {
+            eprint!(
+                "\rDownloading model… {:>3}% ({}/{} bytes)",
+                pct, done, total
+            );
+        } else {
+            eprint!("\rDownloading model… {} bytes", done);
+        }
+        if total > 0 && done >= total {
+            eprintln!();
+        }
     });
 
     let handle = stem_splitter_core::ensure_model("mdx_4stem_v1", None)?;
-    eprintln!("\nOK: cached at {}", handle.local_path.display());
+    eprintln!("OK: cached at {}", handle.local_path.display());
     eprintln!(
         "Manifest says {} stems: {:?}",
         handle.manifest.stems.len(),
         handle.manifest.stems
     );
-
     Ok(())
 }
