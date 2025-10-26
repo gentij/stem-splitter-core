@@ -18,7 +18,7 @@ impl Default for SplitOptions {
     fn default() -> Self {
         Self {
             output_dir: ".".into(),
-            model_name: "mdx_4stem_v1".into(),
+            model_name: "htdemucs_ort_v1".into(),
             manifest_url_override: None,
         }
     }

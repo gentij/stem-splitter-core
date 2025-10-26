@@ -51,9 +51,7 @@ fn main() -> anyhow::Result<()> {
     let opts = stem_splitter_core::SplitOptions {
         output_dir: out,
         model_name: "htdemucs_ort_v1".into(),
-        manifest_url_override: Some(
-            "https://huggingface.co/gentij/htdemucs-ort/resolve/main/manifest.json".into(),
-        ),
+        manifest_url_override: None,
     };
 
     let res = stem_splitter_core::split_file(&input, opts)?;

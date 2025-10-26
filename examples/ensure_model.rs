@@ -19,7 +19,7 @@ fn main() -> anyhow::Result<()> {
         }
     });
 
-    let handle = stem_splitter_core::ensure_model("mdx_4stem_v1", None)?;
+    let handle = stem_splitter_core::ensure_model("htdemucs_ort_v1", None)?;
     eprintln!("OK: cached at {}", handle.local_path.display());
     eprintln!(
         "Manifest says {} stems: {:?}",
