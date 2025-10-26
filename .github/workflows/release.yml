@@ -1,0 +1,123 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'  
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+l  test:
+    name: Test before release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        features: ["", "engine-mock"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo builds
+        uses: Swatinem/rust-cache@v2
+
+      - name: Set hermetic cache dir (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: echo "XDG_CACHE_HOME=$RUNNER_TEMP/xdg-cache" >> $GITHUB_ENV
+
+      - name: Set hermetic cache dir (Windows)
+        if: runner.os == 'Windows'
+        run: echo "XDG_CACHE_HOME=$env:RUNNER_TEMP\\xdg-cache" >> $env:GITHUB_ENV
+        shell: pwsh
+
+      - name: Build
+        run: cargo build --all --features "${{ matrix.features }}"
+
+      - name: Test
+        shell: bash
+        run: |
+          if [ -z "${{ matrix.features }}" ]; then
+            cargo test --all
+          else
+            cargo test --all --features "${{ matrix.features }}"
+          fi
+
+l  publish:
+    name: Publish to crates.io
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify version matches tag
+        run: |
+          TAG_VERSION=${GITHUB_REF#refs/tags/v}
+          CARGO_VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
+          if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
+            echo "Error: Tag version ($TAG_VERSION) doesn't match Cargo.toml version ($CARGO_VERSION)"
+            exit 1
+          fi
+          echo "Version check passed: $TAG_VERSION"
+
+      - name: Publish to crates.io
+        run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  github-release:
+    name: Create GitHub Release
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref }}
+          release_name: Release v${{ steps.version.outputs.VERSION }}
+          body: |
+            ## 🎉 stem-splitter-core v${{ steps.version.outputs.VERSION }}
+            
+            ### Major Architectural Change
+            
+            This release removes the Python dependency entirely and migrates to **pure Rust with ONNX Runtime**.
+            
+            ✨ **What's New:**
+            - 🦀 Pure Rust implementation - no Python required
+            - ⚡ ONNX Runtime for high-performance inference  
+            - 🧠 HTDemucs-ORT model (converted from Meta's Demucs v4)
+            - 📦 Simplified deployment - just add the crate, no Python setup needed
+            - 🚀 Improved performance and reduced system requirements
+            
+            See the [CHANGELOG](https://github.com/gentij/stem-splitter-core/blob/main/CHANGELOG.md) for full details.
+            
+            ### Installation
+            ```toml
+            [dependencies]
+            stem-splitter-core = "${{ steps.version.outputs.VERSION }}"
+            ```
+            
+            ### Links
+            - 📦 [Crates.io](https://crates.io/crates/stem-splitter-core)
+            - 📚 [Documentation](https://docs.rs/stem-splitter-core)
+            - 🤗 [HTDemucs-ORT Model](https://huggingface.co/gentij/htdemucs-ort)
+          draft: false
+          prerelease: false
+

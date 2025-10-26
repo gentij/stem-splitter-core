@@ -1,6 +1,6 @@
 [package]
 name = "stem-splitter-core"
-version = "0.1.2"
+version = "1.0.0"
 edition = "2021"
 description = "Core library for AI-powered audio stem separation"
 license = "MIT OR Apache-2.0"
@@ -13,11 +13,10 @@ categories = ["multimedia::audio", "science"]
 authors = ["Gentrit Jashari gentijashari5@gmail.com"]
 include = [
   "src/**",
+  "models/**",
   "Cargo.toml",
-  "Cargo.lock",
   "README.md",
-  "LICENSE*",
-  "demucs_runner.py"
+  "LICENSE*"
 ]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -36,7 +35,6 @@ sha2 = "0.10"
 hex = "0.4"
 directories = "5"
 thiserror = "1"
-httpmock = "0.7"
 rand = "0.8"
 once_cell = "1.19" 
 rustfft = "6"
