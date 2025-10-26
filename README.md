@@ -13,8 +13,9 @@
 
 - **No Python dependency** - Pure Rust implementation
 - **High-quality separation** - Uses the Hybrid Transformer Demucs (htdemucs) model
-- **Automatic model management** - Downloads and caches models from HuggingFace
+- **Automatic model management** - Downloads and caches models with registry support
 - **Fast inference** - Optimized ONNX Runtime with multi-threading support
+- **Progress tracking** - Built-in callbacks for download and processing progress
 - **Production-ready** - Memory-safe, performant, and battle-tested
 
 Perfect for music production tools, DJ software, karaoke apps, or any application requiring audio source separation.
@@ -25,10 +26,11 @@ Perfect for music production tools, DJ software, karaoke apps, or any applicatio
 
 - 🎵 **4-Stem Separation** — Isolate vocals, drums, bass, and other instruments
 - 🧠 **State-of-the-art AI** — Hybrid Transformer Demucs model (htdemucs)
-- 📦 **Auto Model Management** — Automatically downloads and verifies models from HuggingFace
+- 📦 **Model Registry** — Built-in model registry with support for multiple models
 - 🎚️ **Multiple Formats** — Supports WAV, MP3, FLAC, OGG, and more via Symphonia
+- 📊 **Progress Tracking** — Real-time callbacks for download and split progress
 - 🔒 **Type-safe** — Strong compile-time guarantees with Rust's type system
-- 💾 **Smart Caching** — Models cached in user directories, downloaded once
+- 💾 **Smart Caching** — Models cached in user directories with SHA-256 verification
 
 ---
 
@@ -79,6 +81,67 @@ fn main() -> anyhow::Result<()> {
 }
 ```
 
+Or even simpler with defaults:
+
+```rust
+use stem_splitter_core::{split_file, SplitOptions};
+
+fn main() -> anyhow::Result<()> {
+    // Use default options (htdemucs_ort_v1 model, current directory)
+    let result = split_file("song.mp3", SplitOptions::default())?;
+    
+    println!("Vocals: {}", result.vocals_path);
+    Ok(())
+}
+```
+
+### With Progress Tracking
+
+```rust
+use stem_splitter_core::{split_file, SplitOptions, SplitProgress};
+
+fn main() -> anyhow::Result<()> {
+    // Set download progress callback
+    stem_splitter_core::set_download_progress_callback(|downloaded, total| {
+        let percent = if total > 0 {
+            (downloaded as f64 / total as f64 * 100.0) as u64
+        } else {
+            0
+        };
+        if total > 0 {
+            eprint!("\rDownloading model… {}% ({}/{} bytes)", percent, downloaded, total);
+            if downloaded >= total {
+                eprintln!();
+            }
+        }
+    });
+
+    // Set split progress callback
+    stem_splitter_core::set_split_progress_callback(|progress| {
+        match progress {
+            SplitProgress::Stage(stage) => {
+                eprintln!("> Stage: {}", stage);
+            }
+            SplitProgress::Writing { stem, percent, .. } => {
+                eprintln!("Writing {}: {:.0}%", stem, percent);
+            }
+            SplitProgress::Finished => {
+                eprintln!("Split finished!");
+            }
+            _ => {}
+        }
+    });
+
+    let options = SplitOptions {
+        output_dir: "./output".to_string(),
+        ..Default::default()  // Uses htdemucs_ort_v1 by default
+    };
+
+    split_file("song.mp3", options)?;
+    Ok(())
+}
+```
+
 ### Pre-loading Models
 
 For applications that need to minimize latency, pre-load the model:
@@ -125,10 +188,15 @@ pub struct SplitOptions {
     pub model_name: String,
     
     /// Optional: Override the model manifest URL
-    /// (useful for custom or local models)
+    /// (useful for custom models or specific versions)
     pub manifest_url_override: Option<String>,
 }
 ```
+
+**Default values:**
+- `output_dir`: `"."`
+- `model_name`: `"htdemucs_ort_v1"`
+- `manifest_url_override`: `None`
 
 ### `SplitResult`
 
@@ -143,19 +211,54 @@ pub struct SplitResult {
 }
 ```
 
-### `set_download_progress_callback`
+### `prepare_model(model_name: &str, manifest_url_override: Option<&str>) -> Result<()>`
+
+Pre-loads and caches a model for faster subsequent splits.
+
+**Parameters:**
+- `model_name`: Name of the model to prepare
+- `manifest_url_override`: Optional URL to override the manifest location
+
+### `ensure_model(model_name: &str, manifest_url_override: Option<&str>) -> Result<ModelHandle>`
+
+Downloads and verifies a model, returning a handle with metadata.
+
+**Parameters:**
+- `model_name`: Name of the model to ensure
+- `manifest_url_override`: Optional URL to override the manifest location
+
+**Returns:**
+- `ModelHandle` containing the manifest and local path to the model
+
+### `set_download_progress_callback(callback: F)`
 
 Set a callback to track model download progress.
 
 ```rust
 pub fn set_download_progress_callback<F>(callback: F)
 where
-    F: Fn(u64, u64) + Send + Sync + 'static,
+    F: Fn(u64, u64) + Send + 'static,
 ```
 
 **Callback parameters:**
 - `downloaded`: Bytes downloaded so far
-- `total`: Total bytes to download
+- `total`: Total bytes to download (0 if unknown)
+
+### `set_split_progress_callback(callback: F)`
+
+Set a callback to track split processing progress.
+
+```rust
+pub fn set_split_progress_callback<F>(callback: F)
+where
+    F: Fn(SplitProgress) + Send + 'static,
+```
+
+**SplitProgress variants:**
+- `Stage(&'static str)`: Current processing stage (e.g., "resolve_model", "read_audio", "infer")
+- `Chunks { done, total, percent }`: Progress through audio chunks
+- `Writing { stem, done, total, percent }`: Progress writing a specific stem
+- `Finished`: Processing complete
 
 ---
 
@@ -176,21 +279,29 @@ The library supports a wide range of audio formats through the [Symphonia](https
 
 ## 🧠 Model Information
 
-### Default Model: htdemucs_ort_v1
+### HTDemucs-ORT (htdemucs_ort_v1)
+
+This is the default and currently supported model:
 
 - **Architecture:** Hybrid Transformer Demucs
 - **Format:** ONNX Runtime optimized
-- **Size:** ~190MB
+- **Size:** ~200MB (~209MB to be precise)
 - **Quality:** State-of-the-art separation quality
-- **Sources:** 4 stems (vocals, drums, bass, other)
+- **Sources:** 4 stems (drums, bass, other, vocals)
 - **Sample Rate:** 44.1kHz
+- **Window Size:** 343,980 samples (~7.8 seconds)
+- **Hop Size:** 171,990 samples (50% overlap)
 - **Origin:** Converted from [Meta's Demucs v4](https://github.com/facebookresearch/demucs)
 
-The model is automatically downloaded from HuggingFace on first use and cached locally.
+The model is automatically downloaded from [HuggingFace](https://huggingface.co/gentij/htdemucs-ort/resolve/main/manifest.json) on first use and cached locally in your system's cache directory with SHA-256 verification.
+
+### Model Registry
+
+The library includes a built-in model registry (`models/registry.json`) that maps model names to their manifest URLs. This allows users to simply specify `"htdemucs_ort_v1"` without needing to remember or provide the full HuggingFace URL.
 
 ### Custom Models
 
-You can use custom models by providing a manifest URL:
+You can use custom models by providing a manifest URL override:
 
 ```rust
 let options = SplitOptions {
@@ -201,24 +312,6 @@ let options = SplitOptions {
     ),
 };
 ```
-
----
-
-## ⚙️ Performance
-
-### Benchmark (Apple M1, 3-minute song)
-
-- **Processing Time:** ~2m 40s
-- **Memory Usage:** ~800MB peak
-- **Model Load Time:** <5s (after initial download)
-- **Chunk Processing:** ~7 chunks @ 343,980 samples each
-
-### Optimization Tips
-
-1. **Use Release Mode:** Always build with `--release` for ~10x speedup
-2. **Pre-load Models:** Call `prepare_model()` at startup to avoid download delays
-3. **Batch Processing:** Reuse the loaded model for multiple files
-4. **Hardware:** More CPU cores = faster processing (auto-detected)
 
 ---
 
@@ -235,12 +328,6 @@ match split_file("song.mp3", SplitOptions::default()) {
     }
     Err(e) => {
         eprintln!("Error during separation: {}", e);
-        // Handle different error types
-        if e.to_string().contains("Model") {
-            eprintln!("Model download/load failed");
-        } else if e.to_string().contains("audio") {
-            eprintln!("Audio file reading failed");
-        }
     }
 }
 ```
@@ -257,7 +344,7 @@ fn main() -> anyhow::Result<()> {
     let handle: ModelHandle = ensure_model("htdemucs_ort_v1", None)?;
     
     // Access model metadata
-    println!("Model path: {}", handle.local_path);
+    println!("Model path: {}", handle.local_path.display());
     println!("Sample rate: {}", handle.manifest.sample_rate);
     println!("Window size: {}", handle.manifest.window);
     println!("Stems: {:?}", handle.manifest.stems);
@@ -272,13 +359,35 @@ fn main() -> anyhow::Result<()> {
 
 ### Running Examples
 
+The library includes two examples demonstrating key features:
+
+#### `split_one` - Complete stem separation with progress tracking
+
 ```bash
-# Basic example
+# Split an audio file into stems
 cargo run --release --example split_one -- input.mp3 ./output
 
-# With custom model
-cargo run --release --example split_one -- song.wav ./stems
+# Usage: split_one <audio_file> [output_dir]
+# Default output directory is ./out
 ```
+
+This example demonstrates:
+- Download progress callbacks
+- Split progress callbacks (stages, chunks, writing)
+- Custom model manifest URLs
+- Complete stem separation workflow
+
+#### `ensure_model` - Model download and caching
+
+```bash
+# Download and cache a model
+cargo run --release --example ensure_model
+```
+
+This example demonstrates:
+- Model download with progress tracking
+- Model metadata inspection
+- Model registry usage
 
 ### Running Tests
 
@@ -308,7 +417,10 @@ cargo build --release
 ## 🤔 FAQ
 
 **Q: Why is the first run slow?**  
-A: The model (~190MB) is downloaded on first use. Subsequent runs are instant.
+A: The model (~200MB) is downloaded on first use. Subsequent runs are instant.
+
+**Q: Where are models stored?**  
+A: Models are cached in your system's standard cache directory with SHA-256 verification for integrity.
 
 **Q: Can I use GPU acceleration?**  
 A: Currently CPU-only. GPU support via ONNX Runtime execution providers is planned.
@@ -316,8 +428,8 @@ A: Currently CPU-only. GPU support via ONNX Runtime execution providers is plann
 **Q: What's the quality compared to Python Demucs?**  
 A: Identical quality - we use the same model architecture, just optimized for ONNX.
 
-**Q: Can I separate more than 4 stems?**  
-A: The current model supports 4 stems. 6-stem models (adding guitar/piano) can be added.
+**Q: Can I use my own custom model?**  
+A: Yes! Use the `manifest_url_override` option to point to your own model manifest.
 
 **Q: Does it work offline?**  
 A: Yes, after the initial model download, everything works offline.
@@ -330,8 +442,9 @@ A: Input audio is automatically resampled to 44.1kHz for processing.
 ## 🗺️ Roadmap
 
 - [ ] GPU acceleration (CUDA, Metal, DirectML)
-- [ ] 6-stem model support (guitar, piano)
+- [ ] Additional model support (6-stem models with guitar/piano)
 - [ ] Real-time processing mode
+- [ ] Streaming API support
 
 ---
 
