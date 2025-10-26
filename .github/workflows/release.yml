@@ -9,7 +9,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-l  test:
+  test:
     name: Test before release
     runs-on: ${{ matrix.os }}
     strategy:
@@ -49,7 +49,7 @@ l  test:
             cargo test --all --features "${{ matrix.features }}"
           fi
 
-l  publish:
+  publish:
     name: Publish to crates.io
     needs: test
     runs-on: ubuntu-latest
