@@ -1,3 +1,5 @@
+use stem_splitter_core::SplitProgress;
+
 fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     let input = args.next().expect("usage: split_one <wav> [out_dir]");
@@ -9,9 +11,40 @@ fn main() -> anyhow::Result<()> {
         } else {
             0
         };
-        eprint!("\rModel: {pct}%");
-        if d == t && t > 0 {
-            eprintln!();
+        if t > 0 {
+            eprint!("\rModel: {:>3}% ({}/{})", pct, d, t);
+            if d >= t {
+                eprintln!();
+            }
+        } else {
+            eprint!("\rModel: {} bytes", d);
+        }
+    });
+
+    stem_splitter_core::set_split_progress_callback(|p| match p {
+        SplitProgress::Stage(s) => {
+            eprintln!("> {}", s);
+        }
+        SplitProgress::Chunks {
+            done,
+            total,
+            percent,
+        } => {
+            eprint!("\rSplit: {}/{} ({:.0}%)", done, total, percent);
+            if done >= total {
+                eprintln!();
+            }
+        }
+        SplitProgress::Writing {
+            ref stem,
+            done,
+            total,
+            percent,
+        } => {
+            eprintln!("Writing {}: {}/{} ({:.0}%)", stem, done, total, percent);
+        }
+        SplitProgress::Finished => {
+            eprintln!("Split finished.");
         }
     });
 

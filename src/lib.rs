@@ -22,7 +22,9 @@ pub mod io {
 
 // Public API
 pub use crate::core::splitter::split_file;
-pub use crate::io::progress::set_download_progress_callback;
+pub use crate::io::progress::{
+    set_download_progress_callback, set_split_progress_callback, SplitProgress,
+};
 pub use crate::model::model_manager::{ensure_model, ModelHandle};
 pub use crate::types::{AudioData, ModelManifest, SplitOptions, SplitResult};
 
