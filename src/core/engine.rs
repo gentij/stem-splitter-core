@@ -1,5 +1,7 @@
+#![cfg_attr(feature = "engine-mock", allow(dead_code, unused_imports))]
+
 use crate::{
-    core::dsp::{stft_cac_stereo_centered, istft_cac_stereo},
+    core::dsp::{istft_cac_stereo, stft_cac_stereo_centered},
     error::{Result, StemError},
     model::model_manager::ModelHandle,
     types::ModelManifest,
@@ -27,6 +29,7 @@ const DEMUCS_FRAMES: usize = 336;
 const DEMUCS_NFFT: usize = 4096;
 const DEMUCS_HOP: usize = 1024;
 
+#[cfg(not(feature = "engine-mock"))]
 pub fn preload(h: &ModelHandle) -> Result<()> {
     ORT_INIT.get_or_try_init::<_, StemError>(|| {
         ort::init().commit().map_err(StemError::from)?;
@@ -50,12 +53,14 @@ pub fn preload(h: &ModelHandle) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(feature = "engine-mock"))]
 pub fn manifest() -> &'static ModelManifest {
     MANIFEST
         .get()
         .expect("engine::preload() must be called once before using the engine")
 }
 
+#[cfg(not(feature = "engine-mock"))]
 pub fn run_window_demucs(left: &[f32], right: &[f32]) -> Result<Array3<f32>> {
     if left.len() != right.len() {
         return Err(anyhow!("L/R length mismatch").into());
@@ -114,7 +119,7 @@ pub fn run_window_demucs(left: &[f32], right: &[f32]) -> Result<Array3<f32>> {
     // "add_67": time domain [1, sources, 2, T]
     let mut output_freq: Option<Value> = None;
     let mut output_time: Option<Value> = None;
-    
+
     for (name, val) in outputs.into_iter() {
         if name == "output" {
             output_freq = Some(val);
@@ -122,50 +127,54 @@ pub fn run_window_demucs(left: &[f32], right: &[f32]) -> Result<Array3<f32>> {
             output_time = Some(val);
         }
     }
-    
-    let out_freq = output_freq.ok_or_else(|| anyhow!("Model did not return 'output' (freq domain)"))?;
-    let out_time = output_time.ok_or_else(|| anyhow!("Model did not return 'add_67' (time domain)"))?;
+
+    let out_freq =
+        output_freq.ok_or_else(|| anyhow!("Model did not return 'output' (freq domain)"))?;
+    let out_time =
+        output_time.ok_or_else(|| anyhow!("Model did not return 'add_67' (time domain)"))?;
 
     // Extract time domain output [1, 4, 2, T] -> [4, 2, T]
     let (shape_time, data_time) = out_time.try_extract_tensor::<f32>()?;
     let num_sources = shape_time[1] as usize;
-    
+
     // Extract frequency domain output [1, sources, 4, F, Frames]
     let (shape_freq, data_freq) = out_freq.try_extract_tensor::<f32>()?;
-    
+
     // Validate shapes
-    if shape_freq[0] != 1 || shape_freq[1] != num_sources as i64 || shape_freq[2] != 4 
-        || shape_freq[3] != f_bins as i64 || shape_freq[4] != frames as i64 {
+    if shape_freq[0] != 1
+        || shape_freq[1] != num_sources as i64
+        || shape_freq[2] != 4
+        || shape_freq[3] != f_bins as i64
+        || shape_freq[4] != frames as i64
+    {
         return Err(anyhow!(
             "Unexpected freq output shape: {:?}, expected [1, {}, 4, {}, {}]",
-            shape_freq, num_sources, f_bins, frames
-        ).into());
+            shape_freq,
+            num_sources,
+            f_bins,
+            frames
+        )
+        .into());
     }
-    
+
     // Combine frequency and time domain outputs
     // According to demucs.onnx: final = time_domain + istft(frequency_domain)
     let mut result = Vec::with_capacity(num_sources * 2 * t);
-    
+
     for src in 0..num_sources {
         // Extract frequency domain for this source [4, F, Frames]
         let src_freq_offset = src * 4 * f_bins * frames;
         let src_freq_data = &data_freq[src_freq_offset..src_freq_offset + 4 * f_bins * frames];
-        
+
         // Apply iSTFT to convert frequency domain to time domain
-        let (left_freq, right_freq) = istft_cac_stereo(
-            src_freq_data,
-            f_bins,
-            frames,
-            DEMUCS_NFFT,
-            DEMUCS_HOP,
-            t,
-        );
-        
+        let (left_freq, right_freq) =
+            istft_cac_stereo(src_freq_data, f_bins, frames, DEMUCS_NFFT, DEMUCS_HOP, t);
+
         // Extract time domain for this source [2, T]
         let src_time_offset = src * 2 * t;
         let left_time = &data_time[src_time_offset..src_time_offset + t];
         let right_time = &data_time[src_time_offset + t..src_time_offset + 2 * t];
-        
+
         // Combine: output = time_domain + frequency_domain (after iSTFT)
         for i in 0..t {
             result.push(left_time[i] + left_freq[i]);
@@ -174,7 +183,40 @@ pub fn run_window_demucs(left: &[f32], right: &[f32]) -> Result<Array3<f32>> {
             result.push(right_time[i] + right_freq[i]);
         }
     }
-    
+
     let out = ndarray::Array3::from_shape_vec((num_sources, 2, t), result)?;
     Ok(out)
 }
+
+#[cfg(feature = "engine-mock")]
+mod _engine_mock {
+    use super::*;
+    use once_cell::sync::OnceCell;
+    static MANIFEST: OnceCell<ModelManifest> = OnceCell::new();
+
+    pub fn preload(h: &ModelHandle) -> Result<()> {
+        MANIFEST.set(h.manifest.clone()).ok();
+        Ok(())
+    }
+
+    pub fn manifest() -> &'static ModelManifest {
+        MANIFEST.get().expect("preload first (mock)")
+    }
+
+    pub fn run_window_demucs(left: &[f32], right: &[f32]) -> Result<Array3<f32>> {
+        let t = left.len().min(right.len());
+        let sources = 4usize;
+        let mut out = vec![0.0f32; sources * 2 * t];
+        for s in 0..sources {
+            for i in 0..t {
+                // “identity” stems: copy input
+                out[s * 2 * t + i] = left[i]; // L
+                out[s * 2 * t + t + i] = right[i]; // R
+            }
+        }
+        Ok(ndarray::Array3::from_shape_vec((sources, 2, t), out)?)
+    }
+}
+
+#[cfg(feature = "engine-mock")]
+pub use _engine_mock::{manifest, preload, run_window_demucs};
