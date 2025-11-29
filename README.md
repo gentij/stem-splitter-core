@@ -14,7 +14,7 @@
 - **No Python dependency** - Pure Rust implementation
 - **High-quality separation** - Uses the Hybrid Transformer Demucs (htdemucs) model
 - **Automatic model management** - Downloads and caches models with registry support
-- **Fast inference** - Optimized ONNX Runtime with multi-threading support
+- **Fast inference** - Optimized ONNX Runtime with GPU acceleration and multi-threading
 - **Progress tracking** - Built-in callbacks for download and processing progress
 - **Production-ready** - Memory-safe, performant, and battle-tested
 
@@ -26,6 +26,7 @@ Perfect for music production tools, DJ software, karaoke apps, or any applicatio
 
 - 🎵 **4-Stem Separation** — Isolate vocals, drums, bass, and other instruments
 - 🧠 **State-of-the-art AI** — Hybrid Transformer Demucs model (htdemucs)
+- 🚀 **GPU Acceleration** — CUDA, CoreML, DirectML, and oneDNN support (auto-detected)
 - 📦 **Model Registry** — Built-in model registry with support for multiple models
 - 🎚️ **Multiple Formats** — Supports WAV, MP3, FLAC, OGG, and more via Symphonia
 - 📊 **Progress Tracking** — Real-time callbacks for download and split progress
@@ -423,7 +424,13 @@ A: The model (~200MB) is downloaded on first use. Subsequent runs are instant.
 A: Models are cached in your system's standard cache directory with SHA-256 verification for integrity.
 
 **Q: Can I use GPU acceleration?**  
-A: Currently CPU-only. GPU support via ONNX Runtime execution providers is planned.
+A: Yes! GPU acceleration is enabled by default and works across all platforms:
+- **NVIDIA GPUs**: CUDA (Linux, Windows)
+- **Apple Silicon**: CoreML (M1/M2/M3/M4 Macs)
+- **Windows (any GPU)**: DirectML (NVIDIA, AMD, Intel)
+- **Intel**: oneDNN optimizations
+
+The library automatically detects available hardware and uses the best execution provider, falling back to CPU if no GPU is available. GPU mode significantly reduces CPU usage (~5x less) while maintaining similar processing speed.
 
 **Q: What's the quality compared to Python Demucs?**  
 A: Identical quality - we use the same model architecture, just optimized for ONNX.
@@ -441,7 +448,7 @@ A: Input audio is automatically resampled to 44.1kHz for processing.
 
 ## 🗺️ Roadmap
 
-- [ ] GPU acceleration (CUDA, Metal, DirectML)
+- [x] GPU acceleration (CUDA, CoreML, DirectML, oneDNN)
 - [ ] Additional model support (6-stem models with guitar/piano)
 - [ ] Real-time processing mode
 - [ ] Streaming API support
