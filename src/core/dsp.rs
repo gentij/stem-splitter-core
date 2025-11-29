@@ -1,23 +1,62 @@
 use num_complex::Complex32;
 use once_cell::sync::Lazy;
 use rustfft::{num_traits::Zero, Fft, FftPlanner};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 
-struct FftCache {
+/// Cached FFT components
+struct FftCacheEntry {
     fft_forward: Arc<dyn Fft<f32>>,
     fft_inverse: Arc<dyn Fft<f32>>,
     hann_window: Vec<f32>,
 }
 
-static FFT_CACHE_4096: Lazy<FftCache> = Lazy::new(|| {
-    let mut planner = FftPlanner::new();
-    FftCache {
-        fft_forward: planner.plan_fft_forward(4096),
-        fft_inverse: planner.plan_fft_inverse(4096),
-        hann_window: compute_hann(4096),
-    }
-});
+/// Global FFT cache supporting multiple sizes
+struct FftCache {
+    entries: RwLock<HashMap<usize, Arc<FftCacheEntry>>>,
+}
 
+impl FftCache {
+    fn new() -> Self {
+        Self {
+            entries: RwLock::new(HashMap::new()),
+        }
+    }
+
+    fn get_or_create(&self, n_fft: usize) -> Arc<FftCacheEntry> {
+        // Try read lock first (fast path)
+        {
+            let entries = self.entries.read().unwrap();
+            if let Some(entry) = entries.get(&n_fft) {
+                return Arc::clone(entry);
+            }
+        }
+
+        // Need to create - use write lock
+        let mut entries = self.entries.write().unwrap();
+        
+        // Double-check after acquiring write lock
+        if let Some(entry) = entries.get(&n_fft) {
+            return Arc::clone(entry);
+        }
+
+        // Create new entry
+        let mut planner = FftPlanner::new();
+        let entry = Arc::new(FftCacheEntry {
+            fft_forward: planner.plan_fft_forward(n_fft),
+            fft_inverse: planner.plan_fft_inverse(n_fft),
+            hann_window: compute_hann(n_fft),
+        });
+        
+        entries.insert(n_fft, Arc::clone(&entry));
+        entry
+    }
+}
+
+/// Global FFT cache
+static FFT_CACHE: Lazy<FftCache> = Lazy::new(FftCache::new);
+
+/// Compute Hann window (called once per n_fft size)
 fn compute_hann(n_fft: usize) -> Vec<f32> {
     if n_fft <= 1 {
         return vec![1.0];
@@ -43,7 +82,7 @@ pub fn to_planar_stereo(interleaved: &[f32], channels: u16) -> Vec<[f32; 2]> {
 }
 
 /// Compute complex-as-channels spectrogram for stereo with center padding.
-/// Returns (buffer, F=2048, Frames=336) for T=343_980, n_fft=4096, hop=1024.
+/// Returns (buffer, F=n_fft/2, Frames) for given input.
 /// Layout is [1, 4, F, Frames] flattened => channels order: L.re, L.im, R.re, R.im.
 pub fn stft_cac_stereo_centered(
     left: &[f32],
@@ -52,28 +91,31 @@ pub fn stft_cac_stereo_centered(
     hop: usize,
 ) -> (Vec<f32>, usize, usize) {
     assert_eq!(left.len(), right.len());
-    assert_eq!(n_fft, 4096, "Only n_fft=4096 is supported (cached)");
     
     let t = left.len();
     let pad = n_fft / 2;
 
-
+    // Pre-allocate padded signals
     let padded_len = pad + t + pad;
     let mut l_sig = vec![0.0f32; padded_len];
     let mut r_sig = vec![0.0f32; padded_len];
     
+    // Copy with padding
     l_sig[pad..pad + t].copy_from_slice(left);
     r_sig[pad..pad + t].copy_from_slice(right);
 
     let frames = 1 + (t / hop);
     let f_bins = n_fft / 2;
 
-    let cache = &*FFT_CACHE_4096;
+    // Get cached FFT and window
+    let cache = FFT_CACHE.get_or_create(n_fft);
     let fft = &cache.fft_forward;
     let window = &cache.hann_window;
 
+    // Output buffer
     let mut out = vec![0.0f32; 4 * f_bins * frames];
 
+    // Scratch buffers (reused across frames)
     let mut buf_l = vec![Complex32::zero(); n_fft];
     let mut buf_r = vec![Complex32::zero(); n_fft];
 
@@ -82,6 +124,7 @@ pub fn stft_cac_stereo_centered(
         let li = &l_sig[start..start + n_fft];
         let ri = &r_sig[start..start + n_fft];
 
+        // Window and pack into complex
         for i in 0..n_fft {
             let w = window[i];
             buf_l[i] = Complex32::new(li[i] * w, 0.0);
@@ -91,6 +134,7 @@ pub fn stft_cac_stereo_centered(
         fft.process(&mut buf_l);
         fft.process(&mut buf_r);
 
+        // Write channels [L.re, L.im, R.re, R.im] over [F,Frames]
         for fi in 0..f_bins {
             let base_fr = fi * frames + fr;
             out[0 * f_bins * frames + base_fr] = buf_l[fi].re;
@@ -114,10 +158,8 @@ pub fn istft_cac_stereo(
     hop: usize,
     target_length: usize,
 ) -> (Vec<f32>, Vec<f32>) {
-    assert_eq!(n_fft, 4096, "Only n_fft=4096 is supported (cached)");
-    
-    // Use cached IFFT and window
-    let cache = &*FFT_CACHE_4096;
+    // Get cached IFFT and window
+    let cache = FFT_CACHE.get_or_create(n_fft);
     let ifft = &cache.fft_inverse;
     let window = &cache.hann_window;
 
@@ -163,8 +205,10 @@ pub fn istft_cac_stereo(
         // Ensure DC and Nyquist are real
         buf_l[0].im = 0.0;
         buf_r[0].im = 0.0;
-        buf_l[n_fft / 2].im = 0.0;
-        buf_r[n_fft / 2].im = 0.0;
+        if n_fft % 2 == 0 && f_bins < n_fft {
+            buf_l[n_fft / 2].im = 0.0;
+            buf_r[n_fft / 2].im = 0.0;
+        }
 
         // Apply IFFT
         ifft.process(&mut buf_l);
@@ -211,9 +255,9 @@ pub fn istft_cac_stereo(
     (left_final, right_final)
 }
 
-/// Parallel iSTFT for multiple sources - processes all 4 stems in parallel
+/// Parallel iSTFT for multiple sources - processes all stems in parallel
 pub fn istft_cac_stereo_parallel(
-    sources_data: &[&[f32]],  // Slice of 4 source spectrograms
+    sources_data: &[&[f32]],  // Slice of source spectrograms
     f_bins: usize,
     frames: usize,
     n_fft: usize,
