@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2024-11-29
+
+### ⚡ Performance & GPU Acceleration
+
+This release adds GPU acceleration support and significant performance improvements.
+
+### Added
+- **GPU Acceleration**: Cross-platform GPU support via ONNX Runtime execution providers
+  - CUDA for NVIDIA GPUs (Linux, Windows)
+  - CoreML for Apple Silicon (macOS)
+  - DirectML for Windows (NVIDIA, AMD, Intel)
+  - oneDNN for Intel optimizations (all platforms)
+  - Automatic fallback to CPU if no GPU available
+- **Parallel iSTFT Processing**: All 4 stems now processed in parallel using rayon
+- **Cached FFT Planner**: FFT planners and Hann windows cached globally for reuse
+
+### Changed
+- ~14% faster processing time (1:49 vs 2:07 on test files)
+- ~5x reduction in CPU usage when GPU acceleration is active
+- Reduced memory allocations in hot paths
+
+### Dependencies
+- Added `rayon` for parallel processing
+
 ## [1.0.0] - 2024-10-26
 
 ### 🎉 Major Release - Complete Architecture Rewrite
@@ -34,6 +58,7 @@ This is a **major architectural change** moving from Python-based processing to 
 
 Earlier versions (< 1.0.0) used a Python-based approach and are not compatible with this release.
 
-[Unreleased]: https://github.com/gentij/stem-splitter-core/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/gentij/stem-splitter-core/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/gentij/stem-splitter-core/releases/tag/v1.1.0
 [1.0.0]: https://github.com/gentij/stem-splitter-core/releases/tag/v1.0.0
 
