@@ -47,5 +47,13 @@ httpmock = "0.7"              # to simulate remote manifest/model servers
 tempfile = "3.8"              # also used in tests for isolated dirs
 
 [features]
+default = ["cuda", "coreml", "directml", "onednn"]
 engine-mock = []
+
+# GPU acceleration providers - enable all by default, code handles platform detection
+# Providers that don't apply to the target platform are automatically skipped
+cuda = ["ort/cuda"]           # NVIDIA GPUs (Linux, Windows)
+coreml = ["ort/coreml"]       # Apple Silicon (macOS only)  
+directml = ["ort/directml"]   # DirectML (Windows only)
+onednn = ["ort/onednn"]       # Intel optimized (all platforms)
 

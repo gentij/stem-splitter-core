@@ -11,6 +11,7 @@ use anyhow::anyhow;
 use ndarray::Array3;
 use once_cell::sync::OnceCell;
 use ort::{
+    execution_providers::ExecutionProviderDispatch,
     session::{
         builder::{GraphOptimizationLevel, SessionBuilder},
         Session,
@@ -18,6 +19,19 @@ use ort::{
     value::{Tensor, Value},
 };
 use std::sync::Mutex;
+
+// CUDA: Linux and Windows only
+#[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
+use ort::execution_providers::CUDAExecutionProvider;
+// CoreML: macOS only (Apple Silicon)
+#[cfg(all(feature = "coreml", target_os = "macos"))]
+use ort::execution_providers::CoreMLExecutionProvider;
+// DirectML: Windows only
+#[cfg(all(feature = "directml", target_os = "windows"))]
+use ort::execution_providers::DirectMLExecutionProvider;
+// oneDNN: All platforms
+#[cfg(feature = "onednn")]
+use ort::execution_providers::OneDNNExecutionProvider;
 
 static SESSION: OnceCell<Mutex<Session>> = OnceCell::new();
 static MANIFEST: OnceCell<ModelManifest> = OnceCell::new();
@@ -29,6 +43,45 @@ const DEMUCS_FRAMES: usize = 336;
 const DEMUCS_NFFT: usize = 4096;
 const DEMUCS_HOP: usize = 1024;
 
+#[allow(unused_mut)]
+fn get_execution_providers() -> Vec<ExecutionProviderDispatch> {
+    let mut providers: Vec<ExecutionProviderDispatch> = Vec::new();
+
+    #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
+    {
+        providers.push(
+            CUDAExecutionProvider::default()
+                .build()
+        );
+    }
+
+    #[cfg(all(feature = "coreml", target_os = "macos"))]
+    {
+        providers.push(
+            CoreMLExecutionProvider::default()
+                .build()
+        );
+    }
+
+    #[cfg(all(feature = "directml", target_os = "windows"))]
+    {
+        providers.push(
+            DirectMLExecutionProvider::default()
+                .build()
+        );
+    }
+
+    #[cfg(feature = "onednn")]
+    {
+        providers.push(
+            OneDNNExecutionProvider::default()
+                .build()
+        );
+    }
+
+    providers
+}
+
 #[cfg(not(feature = "engine-mock"))]
 pub fn preload(h: &ModelHandle) -> Result<()> {
     ORT_INIT.get_or_try_init::<_, StemError>(|| {
@@ -36,17 +89,55 @@ pub fn preload(h: &ModelHandle) -> Result<()> {
         Ok(())
     })?;
 
-    // Use more threads for better performance
     let num_threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
 
-    let session = SessionBuilder::new()?
-        .with_optimization_level(GraphOptimizationLevel::Level3)?
-        .with_intra_threads(num_threads)?
-        .with_inter_threads(num_threads)?
-        .with_parallel_execution(true)?
-        .commit_from_file(&h.local_path)?;
+    let providers = get_execution_providers();
+    
+    let session = if providers.is_empty() {
+        eprintln!("Using CPU ({} threads) - no GPU features enabled", num_threads);
+        SessionBuilder::new()?
+            .with_optimization_level(GraphOptimizationLevel::Level3)?
+            .with_intra_threads(num_threads)?
+            .with_inter_threads(num_threads)?
+            .with_parallel_execution(true)?
+            .commit_from_file(&h.local_path)?
+    } else {
+        #[allow(unused_mut)]
+        let mut provider_names: Vec<&str> = Vec::new();
+        #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
+        provider_names.push("CUDA");
+        #[cfg(all(feature = "coreml", target_os = "macos"))]
+        provider_names.push("CoreML");
+        #[cfg(all(feature = "directml", target_os = "windows"))]
+        provider_names.push("DirectML");
+        #[cfg(feature = "onednn")]
+        provider_names.push("oneDNN");
+        
+        eprintln!("Trying execution providers: {:?} (with CPU fallback)", provider_names);
+        
+        match SessionBuilder::new()?
+            .with_optimization_level(GraphOptimizationLevel::Level3)?
+            .with_execution_providers(providers)
+        {
+            Ok(builder) => {
+                builder
+                    .with_intra_threads(2)?
+                    .with_inter_threads(2)?
+                    .commit_from_file(&h.local_path)?
+            }
+            Err(e) => {
+                eprintln!("GPU providers failed ({}), using CPU ({} threads)", e, num_threads);
+                SessionBuilder::new()?
+                    .with_optimization_level(GraphOptimizationLevel::Level3)?
+                    .with_intra_threads(num_threads)?
+                    .with_inter_threads(num_threads)?
+                    .with_parallel_execution(true)?
+                    .commit_from_file(&h.local_path)?
+            }
+        }
+    };
 
     SESSION.set(Mutex::new(session)).ok();
     MANIFEST.set(h.manifest.clone()).ok();
