@@ -1,7 +1,7 @@
 #![cfg_attr(feature = "engine-mock", allow(dead_code, unused_imports))]
 
 use crate::{
-    core::dsp::{istft_cac_stereo, stft_cac_stereo_centered},
+    core::dsp::{istft_cac_stereo_parallel, stft_cac_stereo_centered},
     error::{Result, StemError},
     model::model_manager::ModelHandle,
     types::ModelManifest,
@@ -248,19 +248,18 @@ pub fn run_window_demucs(left: &[f32], right: &[f32]) -> Result<Array3<f32>> {
         .into());
     }
 
-    // Combine frequency and time domain outputs
-    // According to demucs.onnx: final = time_domain + istft(frequency_domain)
+    let source_specs: Vec<&[f32]> = (0..num_sources)
+        .map(|src| {
+            let src_freq_offset = src * 4 * f_bins * frames;
+            &data_freq[src_freq_offset..src_freq_offset + 4 * f_bins * frames]
+        })
+        .collect();
+
+    let istft_results = istft_cac_stereo_parallel(&source_specs, f_bins, frames, DEMUCS_NFFT, DEMUCS_HOP, t);
+
     let mut result = Vec::with_capacity(num_sources * 2 * t);
 
-    for src in 0..num_sources {
-        // Extract frequency domain for this source [4, F, Frames]
-        let src_freq_offset = src * 4 * f_bins * frames;
-        let src_freq_data = &data_freq[src_freq_offset..src_freq_offset + 4 * f_bins * frames];
-
-        // Apply iSTFT to convert frequency domain to time domain
-        let (left_freq, right_freq) =
-            istft_cac_stereo(src_freq_data, f_bins, frames, DEMUCS_NFFT, DEMUCS_HOP, t);
-
+    for (src, (left_freq, right_freq)) in istft_results.into_iter().enumerate() {
         // Extract time domain for this source [2, T]
         let src_time_offset = src * 2 * t;
         let left_time = &data_time[src_time_offset..src_time_offset + t];
