@@ -57,10 +57,17 @@ fn get_execution_providers() -> Vec<ExecutionProviderDispatch> {
 
     #[cfg(all(feature = "coreml", target_os = "macos"))]
     {
-        providers.push(
-            CoreMLExecutionProvider::default()
-                .build()
-        );
+        // CoreML can sometimes produce silent/zero outputs on certain models
+        // Only enable if ENABLE_COREML env var is set
+        if std::env::var("ENABLE_COREML").is_ok() {
+            eprintln!("CoreML enabled via ENABLE_COREML environment variable");
+            providers.push(
+                CoreMLExecutionProvider::default()
+                    .build()
+            );
+        } else {
+            eprintln!("CoreML disabled by default (set ENABLE_COREML=1 to enable)");
+        }
     }
 
     #[cfg(all(feature = "directml", target_os = "windows"))]
@@ -73,6 +80,7 @@ fn get_execution_providers() -> Vec<ExecutionProviderDispatch> {
 
     #[cfg(feature = "onednn")]
     {
+        // oneDNN can improve performance on Intel CPUs
         providers.push(
             OneDNNExecutionProvider::default()
                 .build()
@@ -123,8 +131,8 @@ pub fn preload(h: &ModelHandle) -> Result<()> {
         {
             Ok(builder) => {
                 builder
-                    .with_intra_threads(2)?
-                    .with_inter_threads(2)?
+                    .with_intra_threads(num_threads)?
+                    .with_inter_threads(num_threads)?
                     .commit_from_file(&h.local_path)?
             }
             Err(e) => {
@@ -231,6 +239,16 @@ pub fn run_window_demucs(left: &[f32], right: &[f32]) -> Result<Array3<f32>> {
     // Extract frequency domain output [1, sources, 4, F, Frames]
     let (shape_freq, data_freq) = out_freq.try_extract_tensor::<f32>()?;
 
+    // Debug: Check if model outputs are non-zero
+    if std::env::var("DEBUG_STEMS").is_ok() {
+        let time_max = data_time.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
+        let freq_max = data_freq.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
+        eprintln!("Model output stats: time_max={:.6}, freq_max={:.6}", time_max, freq_max);
+        if time_max < 1e-10 && freq_max < 1e-10 {
+            eprintln!("WARNING: Model outputs are all zeros! This indicates a problem with the execution provider.");
+        }
+    }
+
     // Validate shapes
     if shape_freq[0] != 1
         || shape_freq[1] != num_sources as i64
@@ -256,6 +274,15 @@ pub fn run_window_demucs(left: &[f32], right: &[f32]) -> Result<Array3<f32>> {
         .collect();
 
     let istft_results = istft_cac_stereo_parallel(&source_specs, f_bins, frames, DEMUCS_NFFT, DEMUCS_HOP, t);
+
+    // Debug: Check iSTFT results
+    if std::env::var("DEBUG_STEMS").is_ok() {
+        for (src_idx, (left, right)) in istft_results.iter().enumerate() {
+            let left_max = left.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
+            let right_max = right.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
+            eprintln!("iSTFT result [source {}]: left_max={:.6}, right_max={:.6}", src_idx, left_max, right_max);
+        }
+    }
 
     let mut result = Vec::with_capacity(num_sources * 2 * t);
 
