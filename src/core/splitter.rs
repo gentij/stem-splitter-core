@@ -46,6 +46,10 @@ pub fn split_file(input_path: &str, opts: SplitOptions) -> Result<SplitResult> {
         return Err(anyhow::anyhow!("Bad win/hop in manifest").into());
     }
 
+    if std::env::var("DEBUG_STEMS").is_ok() {
+        eprintln!("Window settings: win={}, hop={}, overlap={}", win, hop, win - hop);
+    }
+
     let stems_names = mf.stems.clone();
     let mut stems_count = stems_names.len().max(1);
 
@@ -85,8 +89,9 @@ pub fn split_file(input_path: &str, opts: SplitOptions) -> Result<SplitResult> {
             first_chunk = false;
         }
 
-        // Simply copy the output - no additional windowing
-        let copy_len = t_out.min(win).min(n - pos);
+        // Copy only the non-overlapping part (first 'hop' samples of each window)
+        // This avoids overwriting data from previous windows
+        let copy_len = hop.min(t_out).min(n - pos);
         for st in 0..stems_count {
             for i in 0..copy_len {
                 acc[st][pos + i][0] = out[(st, 0, i)];
@@ -119,6 +124,16 @@ pub fn split_file(input_path: &str, opts: SplitOptions) -> Result<SplitResult> {
     fs::create_dir_all(&opts.output_dir)?;
 
     emit_split_progress(SplitProgress::Stage("write_stems"));
+    
+    if std::env::var("DEBUG_STEMS").is_ok() {
+        for st in 0..stems_count {
+            let max_val = acc[st].iter()
+                .map(|s| s[0].abs().max(s[1].abs()))
+                .fold(0.0f32, f32::max);
+            eprintln!("Accumulator [stem {}]: max_value={:.6}, samples={}", st, max_val, acc[st].len());
+        }
+    }
+    
     let stem_to_wav = |st: usize, base: &str| -> Result<String> {
         let mut inter = Vec::with_capacity(n * 2);
 
