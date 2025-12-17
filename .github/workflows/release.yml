@@ -102,18 +102,7 @@ jobs:
           body: |
             ## 🎉 stem-splitter-core v${{ steps.version.outputs.VERSION }}
             
-            ### Major Architectural Change
-            
-            This release removes the Python dependency entirely and migrates to **pure Rust with ONNX Runtime**.
-            
-            ✨ **What's New:**
-            - 🦀 Pure Rust implementation - no Python required
-            - ⚡ ONNX Runtime for high-performance inference  
-            - 🧠 HTDemucs-ORT model (converted from Meta's Demucs v4)
-            - 📦 Simplified deployment - just add the crate, no Python setup needed
-            - 🚀 Improved performance and reduced system requirements
-            
-            See the [CHANGELOG](https://github.com/gentij/stem-splitter-core/blob/main/CHANGELOG.md) for full details.
+            This release removes the CoreML implementation for MacOS devices **.
             
             ### Installation
             ```toml
