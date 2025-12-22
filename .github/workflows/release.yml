@@ -1,9 +1,9 @@
 name: Release
 
-on:
+"on":
   push:
     tags:
-      - 'v*.*.*'  
+      - "v*.*.*"
 
 env:
   CARGO_TERM_COLOR: always
@@ -100,22 +100,21 @@ jobs:
         with:
           name: Release v${{ steps.version.outputs.VERSION }}
           body: |
-  ## 🎉 stem-splitter-core v${{ steps.version.outputs.VERSION }}
+            ## 🎉 stem-splitter-core v${{ steps.version.outputs.VERSION }}
 
-  ### Changes
-  - Improve execution provider fallback (sequential EP attempts with CPU fallback)
-  - Add `STEMMER_FORCE_CPU` escape hatch for debugging
+            ### Changes
+            - Improve execution provider fallback (sequential EP attempts with CPU fallback)
+            - Add `STEMMER_FORCE_CPU` escape hatch for debugging
 
-  ### Installation
-  ```toml
-  [dependencies]
-  stem-splitter-core = "${{ steps.version.outputs.VERSION }}"
+            ### Installation
+            ```toml
+            [dependencies]
+            stem-splitter-core = "${{ steps.version.outputs.VERSION }}"
+            ```
 
-            
             ### Links
-            - 📦 [Crates.io](https://crates.io/crates/stem-splitter-core)
-            - 📚 [Documentation](https://docs.rs/stem-splitter-core)
-            - 🤗 [HTDemucs-ORT Model](https://huggingface.co/gentij/htdemucs-ort)
+            - 📦 https://crates.io/crates/stem-splitter-core
+            - 📚 https://docs.rs/stem-splitter-core
+            - 🤗 https://huggingface.co/gentij/htdemucs-ort
           draft: false
           prerelease: false
-
