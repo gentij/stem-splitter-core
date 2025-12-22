@@ -49,10 +49,7 @@ fn get_execution_providers() -> Vec<ExecutionProviderDispatch> {
 
     #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
     {
-        providers.push(
-            CUDAExecutionProvider::default()
-                .build()
-        );
+        providers.push(CUDAExecutionProvider::default().build());
     }
 
     #[cfg(all(feature = "coreml", target_os = "macos"))]
@@ -61,10 +58,7 @@ fn get_execution_providers() -> Vec<ExecutionProviderDispatch> {
         // Only enable if ENABLE_COREML env var is set
         if std::env::var("ENABLE_COREML").is_ok() {
             eprintln!("CoreML enabled via ENABLE_COREML environment variable");
-            providers.push(
-                CoreMLExecutionProvider::default()
-                    .build()
-            );
+            providers.push(CoreMLExecutionProvider::default().build());
         } else {
             eprintln!("CoreML disabled by default (set ENABLE_COREML=1 to enable)");
         }
@@ -72,23 +66,81 @@ fn get_execution_providers() -> Vec<ExecutionProviderDispatch> {
 
     #[cfg(all(feature = "directml", target_os = "windows"))]
     {
-        providers.push(
-            DirectMLExecutionProvider::default()
-                .build()
-        );
+        // DirectML can fail on some models/drivers (init errors). Keep it opt-in.
+        if std::env::var("ENABLE_DIRECTML").is_ok() {
+            eprintln!("DirectML enabled via ENABLE_DIRECTML environment variable");
+            providers.push(DirectMLExecutionProvider::default().build());
+        } else {
+            eprintln!("DirectML disabled by default (set ENABLE_DIRECTML=1 to enable)");
+        }
     }
 
     #[cfg(feature = "onednn")]
     {
         // oneDNN can improve performance on Intel CPUs
-        providers.push(
-            OneDNNExecutionProvider::default()
-                .build()
-        );
+        providers.push(OneDNNExecutionProvider::default().build());
     }
 
     providers
 }
+
+#[cfg(not(feature = "engine-mock"))]
+fn commit_cpu_session(model_path: &std::path::Path, num_threads: usize) -> Result<Session> {
+    Ok(SessionBuilder::new()?
+        .with_optimization_level(GraphOptimizationLevel::Level3)?
+        .with_intra_threads(num_threads)?
+        .with_inter_threads(num_threads)?
+        .with_parallel_execution(true)?
+        .commit_from_file(model_path)?)
+}
+
+#[cfg(not(feature = "engine-mock"))]
+fn commit_session_sequential_eps(
+    model_path: &std::path::Path,
+    num_threads: usize,
+    providers: Vec<ExecutionProviderDispatch>,
+) -> Result<Session> {
+    if providers.is_empty() {
+        eprintln!("Using CPU ({} threads) - no GPU features enabled", num_threads);
+        return commit_cpu_session(model_path, num_threads);
+    }
+
+    eprintln!(
+        "Trying execution providers sequentially ({} candidates) with CPU fallback",
+        providers.len()
+    );
+
+    for (idx, ep) in providers.into_iter().enumerate() {
+        let builder_res = SessionBuilder::new()?
+            .with_optimization_level(GraphOptimizationLevel::Level3)?
+            .with_intra_threads(num_threads)?
+            .with_inter_threads(num_threads)?
+            .with_execution_providers(vec![ep]);
+
+        let builder = match builder_res {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("EP builder failed (attempt #{}): {}", idx + 1, e);
+                continue;
+            }
+        };
+
+        match builder.commit_from_file(model_path) {
+            Ok(sess) => {
+                eprintln!("Execution provider selected (attempt #{}).", idx + 1);
+                return Ok(sess);
+            }
+            Err(e) => {
+                eprintln!("EP commit failed (attempt #{}): {}", idx + 1, e);
+                continue;
+            }
+        }
+    }
+
+    eprintln!("All EPs failed; falling back to CPU ({} threads)", num_threads);
+    commit_cpu_session(model_path, num_threads)
+}
+
 
 #[cfg(not(feature = "engine-mock"))]
 pub fn preload(h: &ModelHandle) -> Result<()> {
@@ -101,51 +153,33 @@ pub fn preload(h: &ModelHandle) -> Result<()> {
         .map(|n| n.get())
         .unwrap_or(4);
 
+    // Debug / escape hatch: force CPU
+    if std::env::var("STEMMER_FORCE_CPU").is_ok() {
+        eprintln!("STEMMER_FORCE_CPU is set: using CPU only");
+        let session = commit_cpu_session(h.local_path.as_path(), num_threads)?;
+        SESSION.set(Mutex::new(session)).ok();
+        MANIFEST.set(h.manifest.clone()).ok();
+        return Ok(());
+    }
+
+    // Build provider list (may be empty)
     let providers = get_execution_providers();
-    
-    let session = if providers.is_empty() {
-        eprintln!("Using CPU ({} threads) - no GPU features enabled", num_threads);
-        SessionBuilder::new()?
-            .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_intra_threads(num_threads)?
-            .with_inter_threads(num_threads)?
-            .with_parallel_execution(true)?
-            .commit_from_file(&h.local_path)?
-    } else {
-        #[allow(unused_mut)]
-        let mut provider_names: Vec<&str> = Vec::new();
-        #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
-        provider_names.push("CUDA");
-        #[cfg(all(feature = "coreml", target_os = "macos"))]
-        provider_names.push("CoreML");
-        #[cfg(all(feature = "directml", target_os = "windows"))]
-        provider_names.push("DirectML");
-        #[cfg(feature = "onednn")]
-        provider_names.push("oneDNN");
-        
-        eprintln!("Trying execution providers: {:?} (with CPU fallback)", provider_names);
-        
-        match SessionBuilder::new()?
-            .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_execution_providers(providers)
-        {
-            Ok(builder) => {
-                builder
-                    .with_intra_threads(num_threads)?
-                    .with_inter_threads(num_threads)?
-                    .commit_from_file(&h.local_path)?
-            }
-            Err(e) => {
-                eprintln!("GPU providers failed ({}), using CPU ({} threads)", e, num_threads);
-                SessionBuilder::new()?
-                    .with_optimization_level(GraphOptimizationLevel::Level3)?
-                    .with_intra_threads(num_threads)?
-                    .with_inter_threads(num_threads)?
-                    .with_parallel_execution(true)?
-                    .commit_from_file(&h.local_path)?
-            }
-        }
-    };
+
+    // Optional: print provider list names (for logs)
+    #[allow(unused_mut)]
+    let mut provider_names: Vec<&str> = Vec::new();
+    #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
+    provider_names.push("CUDA");
+    #[cfg(all(feature = "coreml", target_os = "macos"))]
+    provider_names.push("CoreML");
+    #[cfg(all(feature = "directml", target_os = "windows"))]
+    provider_names.push("DirectML (opt-in)");
+    #[cfg(feature = "onednn")]
+    provider_names.push("oneDNN");
+
+    eprintln!("Configured EP candidates: {:?}", provider_names);
+
+    let session = commit_session_sequential_eps(h.local_path.as_path(), num_threads, providers)?;
 
     SESSION.set(Mutex::new(session)).ok();
     MANIFEST.set(h.manifest.clone()).ok();
@@ -243,7 +277,10 @@ pub fn run_window_demucs(left: &[f32], right: &[f32]) -> Result<Array3<f32>> {
     if std::env::var("DEBUG_STEMS").is_ok() {
         let time_max = data_time.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
         let freq_max = data_freq.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
-        eprintln!("Model output stats: time_max={:.6}, freq_max={:.6}", time_max, freq_max);
+        eprintln!(
+            "Model output stats: time_max={:.6}, freq_max={:.6}",
+            time_max, freq_max
+        );
         if time_max < 1e-10 && freq_max < 1e-10 {
             eprintln!("WARNING: Model outputs are all zeros! This indicates a problem with the execution provider.");
         }
@@ -273,14 +310,18 @@ pub fn run_window_demucs(left: &[f32], right: &[f32]) -> Result<Array3<f32>> {
         })
         .collect();
 
-    let istft_results = istft_cac_stereo_parallel(&source_specs, f_bins, frames, DEMUCS_NFFT, DEMUCS_HOP, t);
+    let istft_results =
+        istft_cac_stereo_parallel(&source_specs, f_bins, frames, DEMUCS_NFFT, DEMUCS_HOP, t);
 
     // Debug: Check iSTFT results
     if std::env::var("DEBUG_STEMS").is_ok() {
         for (src_idx, (left, right)) in istft_results.iter().enumerate() {
             let left_max = left.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
             let right_max = right.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
-            eprintln!("iSTFT result [source {}]: left_max={:.6}, right_max={:.6}", src_idx, left_max, right_max);
+            eprintln!(
+                "iSTFT result [source {}]: left_max={:.6}, right_max={:.6}",
+                src_idx, left_max, right_max
+            );
         }
     }
 
