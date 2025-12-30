@@ -57,10 +57,12 @@ fn get_execution_providers() -> Vec<ExecutionProviderDispatch> {
         // CoreML can sometimes produce silent/zero outputs on certain models
         // Only enable if ENABLE_COREML env var is set
         if std::env::var("ENABLE_COREML").is_ok() {
-            eprintln!("CoreML enabled via ENABLE_COREML environment variable");
+            if std::env::var("DEBUG_STEMS").is_ok() {
+                eprintln!("ℹ️  CoreML enabled via ENABLE_COREML environment variable");
+            }
             providers.push(CoreMLExecutionProvider::default().build());
-        } else {
-            eprintln!("CoreML disabled by default (set ENABLE_COREML=1 to enable)");
+        } else if std::env::var("DEBUG_STEMS").is_ok() {
+            eprintln!("ℹ️  CoreML disabled by default (set ENABLE_COREML=1 to enable)");
         }
     }
 
@@ -68,10 +70,12 @@ fn get_execution_providers() -> Vec<ExecutionProviderDispatch> {
     {
         // DirectML can fail on some models/drivers (init errors). Keep it opt-in.
         if std::env::var("ENABLE_DIRECTML").is_ok() {
-            eprintln!("DirectML enabled via ENABLE_DIRECTML environment variable");
+            if std::env::var("DEBUG_STEMS").is_ok() {
+                eprintln!("ℹ️  DirectML enabled via ENABLE_DIRECTML environment variable");
+            }
             providers.push(DirectMLExecutionProvider::default().build());
-        } else {
-            eprintln!("DirectML disabled by default (set ENABLE_DIRECTML=1 to enable)");
+        } else if std::env::var("DEBUG_STEMS").is_ok() {
+            eprintln!("ℹ️  DirectML disabled by default (set ENABLE_DIRECTML=1 to enable)");
         }
     }
 
@@ -101,14 +105,18 @@ fn commit_session_sequential_eps(
     providers: Vec<ExecutionProviderDispatch>,
 ) -> Result<Session> {
     if providers.is_empty() {
-        eprintln!("Using CPU ({} threads) - no GPU features enabled", num_threads);
+        if std::env::var("DEBUG_STEMS").is_ok() {
+            eprintln!("ℹ️  Using CPU ({} threads) - no GPU features enabled", num_threads);
+        }
         return commit_cpu_session(model_path, num_threads);
     }
 
-    eprintln!(
-        "Trying execution providers sequentially ({} candidates) with CPU fallback",
-        providers.len()
-    );
+    if std::env::var("DEBUG_STEMS").is_ok() {
+        eprintln!(
+            "ℹ️  Trying execution providers sequentially ({} candidates) with CPU fallback",
+            providers.len()
+        );
+    }
 
     for (idx, ep) in providers.into_iter().enumerate() {
         let builder_res = SessionBuilder::new()?
@@ -120,24 +128,32 @@ fn commit_session_sequential_eps(
         let builder = match builder_res {
             Ok(b) => b,
             Err(e) => {
-                eprintln!("EP builder failed (attempt #{}): {}", idx + 1, e);
+                if std::env::var("DEBUG_STEMS").is_ok() {
+                    eprintln!("⚠️  EP builder failed (attempt #{}): {}", idx + 1, e);
+                }
                 continue;
             }
         };
 
         match builder.commit_from_file(model_path) {
             Ok(sess) => {
-                eprintln!("Execution provider selected (attempt #{}).", idx + 1);
+                if std::env::var("DEBUG_STEMS").is_ok() {
+                    eprintln!("✅ Execution provider selected (attempt #{}).", idx + 1);
+                }
                 return Ok(sess);
             }
             Err(e) => {
-                eprintln!("EP commit failed (attempt #{}): {}", idx + 1, e);
+                if std::env::var("DEBUG_STEMS").is_ok() {
+                    eprintln!("⚠️  EP commit failed (attempt #{}): {}", idx + 1, e);
+                }
                 continue;
             }
         }
     }
 
-    eprintln!("All EPs failed; falling back to CPU ({} threads)", num_threads);
+    if std::env::var("DEBUG_STEMS").is_ok() {
+        eprintln!("⚠️  All EPs failed; falling back to CPU ({} threads)", num_threads);
+    }
     commit_cpu_session(model_path, num_threads)
 }
 
@@ -155,7 +171,9 @@ pub fn preload(h: &ModelHandle) -> Result<()> {
 
     // Debug / escape hatch: force CPU
     if std::env::var("STEMMER_FORCE_CPU").is_ok() {
-        eprintln!("STEMMER_FORCE_CPU is set: using CPU only");
+        if std::env::var("DEBUG_STEMS").is_ok() {
+            eprintln!("ℹ️  STEMMER_FORCE_CPU is set: using CPU only");
+        }
         let session = commit_cpu_session(h.local_path.as_path(), num_threads)?;
         SESSION.set(Mutex::new(session)).ok();
         MANIFEST.set(h.manifest.clone()).ok();
@@ -177,7 +195,9 @@ pub fn preload(h: &ModelHandle) -> Result<()> {
     #[cfg(feature = "onednn")]
     provider_names.push("oneDNN");
 
-    eprintln!("Configured EP candidates: {:?}", provider_names);
+    if std::env::var("DEBUG_STEMS").is_ok() {
+        eprintln!("ℹ️  Configured EP candidates: {:?}", provider_names);
+    }
 
     let session = commit_session_sequential_eps(h.local_path.as_path(), num_threads, providers)?;
 

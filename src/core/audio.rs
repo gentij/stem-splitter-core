@@ -50,12 +50,15 @@ pub fn read_audio<P: AsRef<Path>>(path: P) -> Result<AudioData> {
         samples.extend_from_slice(buffer.samples());
     }
 
-    println!(
-        "🎧 Read audio: sample_rate={}, channels={}, samples={}",
-        sample_rate,
-        channels,
-        samples.len()
-    );
+    if std::env::var("DEBUG_STEMS").is_ok() {
+        eprintln!(
+            "🎧 Read audio: sample_rate={} Hz, channels={}, samples={} ({:.2} seconds)",
+            sample_rate,
+            channels,
+            samples.len(),
+            samples.len() as f64 / (sample_rate as f64 * channels as f64)
+        );
+    }
 
     Ok(AudioData {
         samples,
