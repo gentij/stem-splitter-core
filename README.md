@@ -35,6 +35,41 @@ Perfect for music production tools, DJ software, karaoke apps, or any applicatio
 
 ---
 
+## 🔧 CLI & Distribution
+
+While `stem-splitter-core` is primarily a Rust library, this repository also provides a
+first-party CLI (`stem-splitter`) and prebuilt binaries for common platforms.
+
+### CLI
+
+The CLI is built on top of `stem-splitter-core` and exposes the same high-performance
+audio stem separation features via the command line.
+
+The CLI source lives in:
+
+src/bin/stem-splitter.rs
+
+### Prebuilt Binaries
+
+Prebuilt binaries are published with each GitHub release:
+
+https://github.com/gentij/stem-splitter-core/releases
+
+These binaries are suitable for:
+- Arch Linux (via AUR)
+- Debian / Ubuntu (manual install)
+- Any glibc-based Linux distribution
+
+### Platform Packages
+
+- macOS: Homebrew
+- Arch Linux: AUR (`stem-splitter-bin`)
+- Linux (generic): tar.gz binary from GitHub Releases
+
+See the `packaging/` directory for reference packaging files.
+
+---
+
 ## 📦 Installation
 
 Add to your `Cargo.toml`:
