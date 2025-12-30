@@ -6,3 +6,5 @@
 /out
 *.tar.gz
 /dist
+.DS_Store
+**/.DS_Store
