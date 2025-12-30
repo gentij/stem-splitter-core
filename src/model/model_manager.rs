@@ -55,7 +55,7 @@ pub fn ensure_model(model_name: &str, manifest_url_override: Option<&str>) -> Re
             let size = fs::metadata(&local_path).map(|m| m.len()).unwrap_or(0);
             if size != a.size_bytes {
                 eprintln!(
-                    "warn: size mismatch for {}, expected {}, got {}",
+                    "⚠️  Warning: size mismatch for {}, expected {} bytes, got {} bytes",
                     local_path.display(),
                     a.size_bytes,
                     size
