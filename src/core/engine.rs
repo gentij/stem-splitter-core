@@ -161,7 +161,7 @@ fn commit_session_sequential_eps(
 #[cfg(not(feature = "engine-mock"))]
 pub fn preload(h: &ModelHandle) -> Result<()> {
     ORT_INIT.get_or_try_init::<_, StemError>(|| {
-        ort::init().commit().map_err(StemError::from)?;
+        ort::init().commit();
         Ok(())
     })?;
 
@@ -251,17 +251,17 @@ pub fn run_window_demucs(left: &[f32], right: &[f32]) -> Result<Array3<f32>> {
 
     // Get input names
     let in_time = session
-        .inputs
+        .inputs()
         .iter()
-        .find(|i| i.name == "input")
-        .map(|i| i.name.clone())
+        .find(|i| i.name() == "input")
+        .map(|i| i.name().to_owned())
         .ok_or_else(|| anyhow!("Model missing input 'input'"))?;
 
     let in_spec = session
-        .inputs
+        .inputs()
         .iter()
-        .find(|i| i.name == "x")
-        .map(|i| i.name.clone())
+        .find(|i| i.name() == "x")
+        .map(|i| i.name().to_owned())
         .ok_or_else(|| anyhow!("Model missing input 'x'"))?;
 
     // Run inference
