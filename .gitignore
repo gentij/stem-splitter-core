@@ -8,3 +8,7 @@
 /dist
 .DS_Store
 **/.DS_Store
+*.mp3
+*.wav
+*.flac
+*.ogg

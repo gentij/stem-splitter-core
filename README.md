@@ -89,6 +89,26 @@ No external dependencies or Python installation required!
 
 ---
 
+🚀 Enabling GPU Acceleration (The PyTorch Shortcut)
+To achieve maximum processing speed (under 45 seconds for a full song) on Windows with an NVIDIA GPU, ONNX Runtime requires CUDA and cuDNN libraries.
+
+Instead of downloading the massive 3GB+ standalone NVIDIA CUDA Toolkit, you can use a clever shortcut if you already have PyTorch installed in Python:
+
+Step 1: Locate your PyTorch DLLs
+Open your terminal (with your Python environment active) and run this exact command to find where PyTorch hides its bundled CUDA files:
+
+Bash
+python -c "import torch, os; print(os.path.join(os.path.dirname(torch.__file__), 'lib'))"
+Step 2: Copy the DLLs
+Navigate to the folder path that was printed. Select and copy all the .dll files in that folder (especially files like cublasLt64_12.dll and cudnn64_8.dll).
+
+Step 3: Drop them into your Rust build
+Paste those .dll files directly into your Rust project's target/release/ directory right next to your compiled .exe (or target/debug/ if you are testing).
+
+When you run the tool, ONNX Runtime will automatically latch onto these libraries and route the heavy neural network math straight to your GPU!
+
+Note: Always run your Rust audio processing in release mode (cargo run --release) to enable LLVM vectorization for the CPU-bound FFT math!
+
 ## 🚀 Quick Start
 
 ### Basic Usage
