@@ -11,7 +11,6 @@ use anyhow::anyhow;
 use ndarray::Array3;
 use once_cell::sync::OnceCell;
 use ort::{
-    execution_providers::ExecutionProviderDispatch,
     session::{
         builder::{GraphOptimizationLevel, SessionBuilder},
         Session,
@@ -19,19 +18,8 @@ use ort::{
     value::{Tensor, Value},
 };
 use std::sync::Mutex;
-
-// CUDA: Linux and Windows only
-#[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
-use ort::execution_providers::CUDAExecutionProvider;
-// CoreML: macOS only (Apple Silicon)
-#[cfg(all(feature = "coreml", target_os = "macos"))]
-use ort::execution_providers::CoreMLExecutionProvider;
-// DirectML: Windows only
-#[cfg(all(feature = "directml", target_os = "windows"))]
-use ort::execution_providers::DirectMLExecutionProvider;
-// oneDNN: All platforms
-#[cfg(feature = "onednn")]
-use ort::execution_providers::OneDNNExecutionProvider;
+// 1. IMPORT THE TRAIT REQUIRED FOR GPU REGISTRATION
+use ort::ep::ExecutionProvider;
 
 static SESSION: OnceCell<Mutex<Session>> = OnceCell::new();
 static MANIFEST: OnceCell<ModelManifest> = OnceCell::new();
@@ -43,125 +31,72 @@ const DEMUCS_FRAMES: usize = 336;
 const DEMUCS_NFFT: usize = 4096;
 const DEMUCS_HOP: usize = 1024;
 
-#[allow(unused_mut)]
-fn get_execution_providers() -> Vec<ExecutionProviderDispatch> {
-    let mut providers: Vec<ExecutionProviderDispatch> = Vec::new();
+// 2. UNIFIED SESSION BUILDER
+#[cfg(not(feature = "engine-mock"))]
+fn commit_session(model_path: &std::path::Path, num_threads: usize) -> Result<Session> {
+    let mut builder = SessionBuilder::new()?
+        .with_optimization_level(GraphOptimizationLevel::Level3)?
+        .with_intra_threads(num_threads)?
+        .with_inter_threads(num_threads)?
+        .with_parallel_execution(true)?;
+
+    #[allow(unused_assignments)]
+    let mut attempted_gpu = false;
 
     #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
     {
-        providers.push(CUDAExecutionProvider::default().build());
-    }
-
-    #[cfg(all(feature = "coreml", target_os = "macos"))]
-    {
-        // CoreML can sometimes produce silent/zero outputs on certain models
-        // Only enable if ENABLE_COREML env var is set
-        if std::env::var("ENABLE_COREML").is_ok() {
-            if std::env::var("DEBUG_STEMS").is_ok() {
-                eprintln!("ℹ️  CoreML enabled via ENABLE_COREML environment variable");
-            }
-            providers.push(CoreMLExecutionProvider::default().build());
-        } else if std::env::var("DEBUG_STEMS").is_ok() {
-            eprintln!("ℹ️  CoreML disabled by default (set ENABLE_COREML=1 to enable)");
+        attempted_gpu = true;
+        println!("🚀 Attempting to initialize CUDA Execution Provider...");
+        let cuda = ort::ep::CUDAExecutionProvider::default();
+        if let Err(e) = cuda.register(&mut builder) {
+            eprintln!("❌ CUDA Registration Failed: {}. \nMake sure CUDA Toolkit and cuDNN are correctly installed.", e);
+        } else {
+            println!("✅ CUDA Execution Provider registered successfully.");
         }
     }
 
-    #[cfg(all(feature = "directml", target_os = "windows"))]
-    {
-        // DirectML can fail on some models/drivers (init errors). Keep it opt-in.
-        if std::env::var("ENABLE_DIRECTML").is_ok() {
-            if std::env::var("DEBUG_STEMS").is_ok() {
-                eprintln!("ℹ️  DirectML enabled via ENABLE_DIRECTML environment variable");
-            }
-            providers.push(DirectMLExecutionProvider::default().build());
-        } else if std::env::var("DEBUG_STEMS").is_ok() {
-            eprintln!("ℹ️  DirectML disabled by default (set ENABLE_DIRECTML=1 to enable)");
+    #[cfg(all(feature = "coreml", target_os = "macos"))]
+    if std::env::var("ENABLE_COREML").is_ok() {
+        attempted_gpu = true;
+        println!("🚀 Attempting to initialize CoreML Execution Provider...");
+        let coreml = ort::ep::CoreMLExecutionProvider::default();
+        if let Err(e) = coreml.register(&mut builder) {
+            eprintln!("❌ CoreML Registration Failed: {}", e);
+        } else {
+            println!("✅ CoreML Execution Provider registered successfully.");
         }
     }
 
     #[cfg(feature = "onednn")]
     {
-        // oneDNN can improve performance on Intel CPUs
-        providers.push(OneDNNExecutionProvider::default().build());
+        println!("🚀 Attempting to initialize oneDNN...");
+        let onednn = ort::ep::OneDNNExecutionProvider::default();
+        let _ = onednn.register(&mut builder);
     }
 
-    providers
-}
-
-#[cfg(not(feature = "engine-mock"))]
-fn commit_cpu_session(model_path: &std::path::Path, num_threads: usize) -> Result<Session> {
-    Ok(SessionBuilder::new()?
-        .with_optimization_level(GraphOptimizationLevel::Level3)?
-        .with_intra_threads(num_threads)?
-        .with_inter_threads(num_threads)?
-        .with_parallel_execution(true)?
-        .commit_from_file(model_path)?)
-}
-
-#[cfg(not(feature = "engine-mock"))]
-fn commit_session_sequential_eps(
-    model_path: &std::path::Path,
-    num_threads: usize,
-    providers: Vec<ExecutionProviderDispatch>,
-) -> Result<Session> {
-    if providers.is_empty() {
-        if std::env::var("DEBUG_STEMS").is_ok() {
-            eprintln!("ℹ️  Using CPU ({} threads) - no GPU features enabled", num_threads);
-        }
-        return commit_cpu_session(model_path, num_threads);
+    if !attempted_gpu {
+        println!("⚠️ No GPU features matched your OS/Target. Defaulting to CPU.");
     }
 
-    if std::env::var("DEBUG_STEMS").is_ok() {
-        eprintln!(
-            "ℹ️  Trying execution providers sequentially ({} candidates) with CPU fallback",
-            providers.len()
-        );
-    }
-
-    for (idx, ep) in providers.into_iter().enumerate() {
-        let builder_res = SessionBuilder::new()?
-            .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_intra_threads(num_threads)?
-            .with_inter_threads(num_threads)?
-            .with_execution_providers(vec![ep]);
-
-        let builder = match builder_res {
-            Ok(b) => b,
-            Err(e) => {
-                if std::env::var("DEBUG_STEMS").is_ok() {
-                    eprintln!("⚠️  EP builder failed (attempt #{}): {}", idx + 1, e);
-                }
-                continue;
-            }
-        };
-
-        match builder.commit_from_file(model_path) {
-            Ok(sess) => {
-                if std::env::var("DEBUG_STEMS").is_ok() {
-                    eprintln!("✅ Execution provider selected (attempt #{}).", idx + 1);
-                }
-                return Ok(sess);
-            }
-            Err(e) => {
-                if std::env::var("DEBUG_STEMS").is_ok() {
-                    eprintln!("⚠️  EP commit failed (attempt #{}): {}", idx + 1, e);
-                }
-                continue;
-            }
+    println!("⏳ Committing ONNX session (this may take a moment)...");
+    match builder.commit_from_file(model_path) {
+        Ok(session) => {
+            println!("✅ Session committed successfully.");
+            Ok(session)
+        },
+        Err(e) => {
+            eprintln!("💥 Failed to commit session: {}", e);
+            Err(e.into())
         }
     }
-
-    if std::env::var("DEBUG_STEMS").is_ok() {
-        eprintln!("⚠️  All EPs failed; falling back to CPU ({} threads)", num_threads);
-    }
-    commit_cpu_session(model_path, num_threads)
 }
 
 
+// 3. CLEAN PRELOAD FUNCTION
 #[cfg(not(feature = "engine-mock"))]
 pub fn preload(h: &ModelHandle) -> Result<()> {
     ORT_INIT.get_or_try_init::<_, StemError>(|| {
-        ort::init().commit().map_err(StemError::from)?;
+        let _ = ort::init().with_name("stem-splitter").commit();
         Ok(())
     })?;
 
@@ -169,37 +104,11 @@ pub fn preload(h: &ModelHandle) -> Result<()> {
         .map(|n| n.get())
         .unwrap_or(4);
 
-    // Debug / escape hatch: force CPU
     if std::env::var("STEMMER_FORCE_CPU").is_ok() {
-        if std::env::var("DEBUG_STEMS").is_ok() {
-            eprintln!("ℹ️  STEMMER_FORCE_CPU is set: using CPU only");
-        }
-        let session = commit_cpu_session(h.local_path.as_path(), num_threads)?;
-        SESSION.set(Mutex::new(session)).ok();
-        MANIFEST.set(h.manifest.clone()).ok();
-        return Ok(());
+        println!("ℹ️ STEMMER_FORCE_CPU is set: using CPU only");
     }
 
-    // Build provider list (may be empty)
-    let providers = get_execution_providers();
-
-    // Optional: print provider list names (for logs)
-    #[allow(unused_mut)]
-    let mut provider_names: Vec<&str> = Vec::new();
-    #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
-    provider_names.push("CUDA");
-    #[cfg(all(feature = "coreml", target_os = "macos"))]
-    provider_names.push("CoreML");
-    #[cfg(all(feature = "directml", target_os = "windows"))]
-    provider_names.push("DirectML (opt-in)");
-    #[cfg(feature = "onednn")]
-    provider_names.push("oneDNN");
-
-    if std::env::var("DEBUG_STEMS").is_ok() {
-        eprintln!("ℹ️  Configured EP candidates: {:?}", provider_names);
-    }
-
-    let session = commit_session_sequential_eps(h.local_path.as_path(), num_threads, providers)?;
+    let session = commit_session(h.local_path.as_path(), num_threads)?;
 
     SESSION.set(Mutex::new(session)).ok();
     MANIFEST.set(h.manifest.clone()).ok();
@@ -249,24 +158,12 @@ pub fn run_window_demucs(left: &[f32], right: &[f32]) -> Result<Array3<f32>> {
         .lock()
         .expect("session poisoned");
 
-    // Get input names
-    let in_time = session
-        .inputs
-        .iter()
-        .find(|i| i.name == "input")
-        .map(|i| i.name.clone())
-        .ok_or_else(|| anyhow!("Model missing input 'input'"))?;
-
-    let in_spec = session
-        .inputs
-        .iter()
-        .find(|i| i.name == "x")
-        .map(|i| i.name.clone())
-        .ok_or_else(|| anyhow!("Model missing input 'x'"))?;
-
-    // Run inference
-    let outputs = session.run(vec![(in_time, time_value), (in_spec, spec_value)])?;
-
+    // In ort 2.0.0-rc.11, we bypass private fields and safely assign 
+    // inputs directly via the macro.
+    let outputs = session.run(ort::inputs![
+        "input" => time_value,
+        "x" => spec_value
+    ])?;
     // Extract both outputs from the model
     // "output": frequency domain [1, sources, 4, F, Frames]
     // "add_67": time domain [1, sources, 2, T]

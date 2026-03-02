@@ -80,9 +80,13 @@ fn handle_split(
     manifest_url: Option<String>,
     quiet: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // 1. START THE TIMER HERE
+    let total_start_time = std::time::Instant::now();
+
     if !std::path::Path::new(&input).exists() {
         return Err(format!("Input file not found: {}", input).into());
     }
+
     
     if !quiet {
         setup_progress_callbacks();
@@ -109,6 +113,7 @@ fn handle_split(
     if !quiet {
         eprintln!();
         eprintln!("✅ Split completed successfully!");
+        eprintln!("⏱️  Total processing time: {:.2?}", total_start_time.elapsed());
         eprintln!();
         eprintln!("Output files:");
         eprintln!("  🎤 Vocals: {}", result.vocals_path);
@@ -251,4 +256,5 @@ fn setup_progress_callbacks() {
         }
     });
 }
+
 
