@@ -1,6 +1,9 @@
 use clap::{Parser, Subcommand};
-use stem_splitter_core::{prepare_model, set_download_progress_callback, set_split_progress_callback, split_file, SplitOptions, SplitProgress};
 use std::process;
+use stem_splitter_core::{
+    prepare_model, set_download_progress_callback, set_split_progress_callback, split_file,
+    SplitOptions, SplitProgress,
+};
 
 #[derive(Parser)]
 #[command(name = "stem-splitter")]
@@ -16,38 +19,38 @@ enum Commands {
     Split {
         #[arg(short, long)]
         input: String,
-        
+
         #[arg(short, long, default_value = ".")]
         output: String,
-        
+
         #[arg(short, long, default_value = "htdemucs_ort_v1")]
         model: String,
-        
+
         #[arg(long)]
         manifest_url: Option<String>,
-        
+
         #[arg(short, long)]
         quiet: bool,
     },
-    
+
     Prepare {
         #[arg(short, long, default_value = "htdemucs_ort_v1")]
         model: String,
-        
+
         #[arg(long)]
         manifest_url: Option<String>,
-        
+
         #[arg(short, long)]
         quiet: bool,
     },
-    
+
     /// List available models
     List,
 }
 
 fn main() {
     let cli = Cli::parse();
-    
+
     let result = match cli.command {
         Commands::Split {
             input,
@@ -63,7 +66,7 @@ fn main() {
         } => handle_prepare(model, manifest_url, quiet),
         Commands::List => handle_list(),
     };
-    
+
     match result {
         Ok(()) => process::exit(0),
         Err(e) => {
@@ -83,17 +86,17 @@ fn handle_split(
     if !std::path::Path::new(&input).exists() {
         return Err(format!("Input file not found: {}", input).into());
     }
-    
+
     if !quiet {
         setup_progress_callbacks();
     }
-    
+
     let opts = SplitOptions {
         output_dir: output.clone(),
         model_name: model.clone(),
         manifest_url_override: manifest_url,
     };
-    
+
     if !quiet {
         eprintln!("🎵 Stem Splitter");
         eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -103,9 +106,9 @@ fn handle_split(
         eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         eprintln!();
     }
-    
+
     let result = split_file(&input, opts)?;
-    
+
     if !quiet {
         eprintln!();
         eprintln!("✅ Split completed successfully!");
@@ -122,7 +125,7 @@ fn handle_split(
         println!("{}", result.bass_path);
         println!("{}", result.other_path);
     }
-    
+
     Ok(())
 }
 
@@ -134,7 +137,7 @@ fn handle_prepare(
     if !quiet {
         eprintln!("📦 Preparing model: {}", model);
         eprintln!();
-        
+
         set_download_progress_callback(|downloaded, total| {
             if total > 0 {
                 let percent = (downloaded as f64 / total as f64 * 100.0).round() as u64;
@@ -148,32 +151,36 @@ fn handle_prepare(
                     eprintln!();
                 }
             } else {
-                eprint!("\rDownloading model: {:.2} MB", downloaded as f64 / 1_000_000.0);
+                eprint!(
+                    "\rDownloading model: {:.2} MB",
+                    downloaded as f64 / 1_000_000.0
+                );
             }
         });
     }
-    
+
     prepare_model(&model, manifest_url.as_deref())?;
-    
+
     if !quiet {
         eprintln!("✅ Model prepared successfully!");
     }
-    
+
     Ok(())
 }
 
 fn handle_list() -> Result<(), Box<dyn std::error::Error>> {
     let registry_json = include_str!("../../models/registry.json");
     let registry: serde_json::Value = serde_json::from_str(registry_json)?;
-    
+
     eprintln!("📋 Available Models");
     eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    
+
     if let Some(models) = registry.get("models").and_then(|m| m.as_array()) {
-        let default = registry.get("default")
+        let default = registry
+            .get("default")
             .and_then(|d| d.as_str())
             .unwrap_or("");
-        
+
         for model in models {
             if let Some(name) = model.get("name").and_then(|n| n.as_str()) {
                 let is_default = name == default;
@@ -182,10 +189,10 @@ fn handle_list() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    
+
     eprintln!();
     eprintln!("Use --model <name> to specify a model");
-    
+
     Ok(())
 }
 
@@ -203,10 +210,13 @@ fn setup_progress_callbacks() {
                 eprintln!();
             }
         } else {
-            eprint!("\r📥 Downloading model: {:.2} MB", downloaded as f64 / 1_000_000.0);
+            eprint!(
+                "\r📥 Downloading model: {:.2} MB",
+                downloaded as f64 / 1_000_000.0
+            );
         }
     });
-    
+
     set_split_progress_callback(|progress| {
         match progress {
             SplitProgress::Stage(stage) => {
@@ -226,7 +236,10 @@ fn setup_progress_callbacks() {
                 total,
                 percent,
             } => {
-                eprint!("\r🔄 Processing: {}/{} chunks ({:.0}%)", done, total, percent);
+                eprint!(
+                    "\r🔄 Processing: {}/{} chunks ({:.0}%)",
+                    done, total, percent
+                );
                 if done >= total {
                     eprintln!();
                 }
@@ -251,4 +264,3 @@ fn setup_progress_callbacks() {
         }
     });
 }
-

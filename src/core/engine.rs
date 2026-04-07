@@ -1,7 +1,10 @@
 #![cfg_attr(feature = "engine-mock", allow(dead_code, unused_imports))]
 
 use crate::{
-    core::dsp::{istft_cac_stereo_parallel, stft_cac_stereo_centered},
+    core::{
+        dsp::{istft_cac_stereo_parallel, stft_cac_stereo_centered},
+        ep,
+    },
     error::{Result, StemError},
     model::model_manager::ModelHandle,
     types::ModelManifest,
@@ -11,31 +14,27 @@ use anyhow::anyhow;
 use ndarray::Array3;
 use once_cell::sync::OnceCell;
 use ort::{
-    execution_providers::ExecutionProviderDispatch,
     session::{
         builder::{GraphOptimizationLevel, SessionBuilder},
         Session,
     },
     value::{Tensor, Value},
 };
-use std::sync::Mutex;
-
-// CUDA: Linux and Windows only
-#[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
-use ort::execution_providers::CUDAExecutionProvider;
-// CoreML: macOS only (Apple Silicon)
-#[cfg(all(feature = "coreml", target_os = "macos"))]
-use ort::execution_providers::CoreMLExecutionProvider;
-// DirectML: Windows only
-#[cfg(all(feature = "directml", target_os = "windows"))]
-use ort::execution_providers::DirectMLExecutionProvider;
-// oneDNN: All platforms
-#[cfg(feature = "onednn")]
-use ort::execution_providers::OneDNNExecutionProvider;
+use std::{
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    },
+};
 
 static SESSION: OnceCell<Mutex<Session>> = OnceCell::new();
 static MANIFEST: OnceCell<ModelManifest> = OnceCell::new();
 static ORT_INIT: OnceCell<()> = OnceCell::new();
+#[cfg(not(feature = "engine-mock"))]
+static ENGINE_CONTEXT: OnceCell<EngineContext> = OnceCell::new();
+#[cfg(not(feature = "engine-mock"))]
+static RUNTIME_EP_FALLBACK_USED: AtomicBool = AtomicBool::new(false);
 
 const DEMUCS_T: usize = 343_980;
 const DEMUCS_F: usize = 2048;
@@ -43,218 +42,149 @@ const DEMUCS_FRAMES: usize = 336;
 const DEMUCS_NFFT: usize = 4096;
 const DEMUCS_HOP: usize = 1024;
 
-#[allow(unused_mut)]
-fn get_execution_providers() -> Vec<ExecutionProviderDispatch> {
-    let mut providers: Vec<ExecutionProviderDispatch> = Vec::new();
+#[cfg(not(feature = "engine-mock"))]
+struct EngineContext {
+    model_path: PathBuf,
+    num_threads: usize,
+}
 
-    #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
-    {
-        providers.push(CUDAExecutionProvider::default().build());
+#[cfg(not(feature = "engine-mock"))]
+struct DemucsRawOutput {
+    num_sources: usize,
+    data_time: Vec<f32>,
+    data_freq: Vec<f32>,
+    time_max: f32,
+    freq_max: f32,
+}
+
+#[cfg(not(feature = "engine-mock"))]
+#[derive(Clone, Copy)]
+struct OrtThreading {
+    intra_threads: usize,
+    inter_threads: usize,
+    parallel_execution: bool,
+}
+
+#[cfg(not(feature = "engine-mock"))]
+fn parse_env_usize(name: &str) -> Option<usize> {
+    let raw = std::env::var(name).ok()?;
+    let parsed = raw.parse::<usize>().ok()?;
+    if parsed == 0 {
+        None
+    } else {
+        Some(parsed)
     }
+}
 
-    #[cfg(all(feature = "coreml", target_os = "macos"))]
-    {
-        // CoreML can sometimes produce silent/zero outputs on certain models
-        // Only enable if ENABLE_COREML env var is set
-        if std::env::var("ENABLE_COREML").is_ok() {
-            if std::env::var("DEBUG_STEMS").is_ok() {
-                eprintln!("ℹ️  CoreML enabled via ENABLE_COREML environment variable");
-            }
-            providers.push(CoreMLExecutionProvider::default().build());
-        } else if std::env::var("DEBUG_STEMS").is_ok() {
-            eprintln!("ℹ️  CoreML disabled by default (set ENABLE_COREML=1 to enable)");
-        }
+#[cfg(not(feature = "engine-mock"))]
+fn parse_env_bool(name: &str) -> Option<bool> {
+    let raw = std::env::var(name).ok()?;
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
     }
+}
 
-    #[cfg(all(feature = "directml", target_os = "windows"))]
-    {
-        // DirectML can fail on some models/drivers (init errors). Keep it opt-in.
-        if std::env::var("ENABLE_DIRECTML").is_ok() {
-            if std::env::var("DEBUG_STEMS").is_ok() {
-                eprintln!("ℹ️  DirectML enabled via ENABLE_DIRECTML environment variable");
-            }
-            providers.push(DirectMLExecutionProvider::default().build());
-        } else if std::env::var("DEBUG_STEMS").is_ok() {
-            eprintln!("ℹ️  DirectML disabled by default (set ENABLE_DIRECTML=1 to enable)");
-        }
+#[cfg(not(feature = "engine-mock"))]
+fn apply_thread_overrides(mut cfg: OrtThreading) -> OrtThreading {
+    if let Some(intra) = parse_env_usize("STEMMER_ORT_INTRA_THREADS") {
+        cfg.intra_threads = intra;
     }
-
-    #[cfg(feature = "onednn")]
-    {
-        // oneDNN can improve performance on Intel CPUs
-        providers.push(OneDNNExecutionProvider::default().build());
+    if let Some(inter) = parse_env_usize("STEMMER_ORT_INTER_THREADS") {
+        cfg.inter_threads = inter;
     }
+    if let Some(parallel) = parse_env_bool("STEMMER_ORT_PARALLEL") {
+        cfg.parallel_execution = parallel;
+    }
+    cfg
+}
 
-    providers
+#[cfg(not(feature = "engine-mock"))]
+fn cpu_threading(num_threads: usize) -> OrtThreading {
+    let base = OrtThreading {
+        intra_threads: num_threads.max(1),
+        inter_threads: 1,
+        parallel_execution: false,
+    };
+    apply_thread_overrides(base)
+}
+
+#[cfg(not(feature = "engine-mock"))]
+fn ep_threading(kind: ep::EpKind, num_threads: usize) -> OrtThreading {
+    let base = match kind {
+        ep::EpKind::Cuda | ep::EpKind::CoreML | ep::EpKind::DirectML => OrtThreading {
+            intra_threads: num_threads.clamp(1, 4),
+            inter_threads: 1,
+            parallel_execution: false,
+        },
+        ep::EpKind::OneDNN | ep::EpKind::Cpu => OrtThreading {
+            intra_threads: num_threads.max(1),
+            inter_threads: 1,
+            parallel_execution: false,
+        },
+    };
+    apply_thread_overrides(base)
 }
 
 #[cfg(not(feature = "engine-mock"))]
 fn commit_cpu_session(model_path: &std::path::Path, num_threads: usize) -> Result<Session> {
+    let threading = cpu_threading(num_threads);
+
+    if std::env::var("DEBUG_STEMS").is_ok() {
+        eprintln!(
+            "ℹ️  ORT CPU threading: intra={}, inter={}, parallel={}",
+            threading.intra_threads, threading.inter_threads, threading.parallel_execution
+        );
+    }
+
     Ok(SessionBuilder::new()?
         .with_optimization_level(GraphOptimizationLevel::Level3)?
-        .with_intra_threads(num_threads)?
-        .with_inter_threads(num_threads)?
-        .with_parallel_execution(true)?
+        .with_intra_threads(threading.intra_threads)?
+        .with_inter_threads(threading.inter_threads)?
+        .with_parallel_execution(threading.parallel_execution)?
         .commit_from_file(model_path)?)
 }
 
 #[cfg(not(feature = "engine-mock"))]
-fn commit_session_sequential_eps(
+fn commit_ep_session(
     model_path: &std::path::Path,
     num_threads: usize,
-    providers: Vec<ExecutionProviderDispatch>,
+    kind: ep::EpKind,
+    provider: ort::execution_providers::ExecutionProviderDispatch,
 ) -> Result<Session> {
-    if providers.is_empty() {
-        if std::env::var("DEBUG_STEMS").is_ok() {
-            eprintln!(
-                "ℹ️  Using CPU ({} threads) - no GPU features enabled",
-                num_threads
-            );
-        }
-        return commit_cpu_session(model_path, num_threads);
-    }
+    let threading = ep_threading(kind, num_threads);
 
     if std::env::var("DEBUG_STEMS").is_ok() {
         eprintln!(
-            "ℹ️  Trying execution providers sequentially ({} candidates) with CPU fallback",
-            providers.len()
+            "ℹ️  ORT EP threading: intra={}, inter={}, parallel={}",
+            threading.intra_threads, threading.inter_threads, threading.parallel_execution
         );
     }
 
-    for (idx, ep) in providers.into_iter().enumerate() {
-        let builder_res = SessionBuilder::new()?
-            .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_intra_threads(num_threads)?
-            .with_inter_threads(num_threads)?
-            .with_execution_providers(vec![ep]);
+    let builder = SessionBuilder::new()?
+        .with_optimization_level(GraphOptimizationLevel::Level3)?
+        .with_intra_threads(threading.intra_threads)?
+        .with_inter_threads(threading.inter_threads)?
+        .with_parallel_execution(threading.parallel_execution)?
+        .with_execution_providers(vec![provider])?;
 
-        let builder = match builder_res {
-            Ok(b) => b,
-            Err(e) => {
-                if std::env::var("DEBUG_STEMS").is_ok() {
-                    eprintln!("⚠️  EP builder failed (attempt #{}): {}", idx + 1, e);
-                }
-                continue;
-            }
-        };
-
-        match builder.commit_from_file(model_path) {
-            Ok(sess) => {
-                if std::env::var("DEBUG_STEMS").is_ok() {
-                    eprintln!("✅ Execution provider selected (attempt #{}).", idx + 1);
-                }
-                return Ok(sess);
-            }
-            Err(e) => {
-                if std::env::var("DEBUG_STEMS").is_ok() {
-                    eprintln!("⚠️  EP commit failed (attempt #{}): {}", idx + 1, e);
-                }
-                continue;
-            }
-        }
-    }
-
-    if std::env::var("DEBUG_STEMS").is_ok() {
-        eprintln!(
-            "⚠️  All EPs failed; falling back to CPU ({} threads)",
-            num_threads
-        );
-    }
-    commit_cpu_session(model_path, num_threads)
+    Ok(builder.commit_from_file(model_path)?)
 }
 
 #[cfg(not(feature = "engine-mock"))]
-pub fn preload(h: &ModelHandle) -> Result<()> {
-    ORT_INIT.get_or_try_init::<_, StemError>(|| {
-        let _ = ort::init().commit();
-        Ok(())
-    })?;
+fn run_demucs_raw_from_inputs(
+    session: &mut Session,
+    t: usize,
+    f_bins: usize,
+    frames: usize,
+    time_branch: Vec<f32>,
+    spec_branch: Vec<f32>,
+) -> Result<DemucsRawOutput> {
+    let time_value: Value = Tensor::from_array((vec![1, 2, t], time_branch))?.into_dyn();
+    let spec_value: Value =
+        Tensor::from_array((vec![1, 4, f_bins, frames], spec_branch))?.into_dyn();
 
-    let num_threads = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
-
-    // Debug / escape hatch: force CPU
-    if std::env::var("STEMMER_FORCE_CPU").is_ok() {
-        if std::env::var("DEBUG_STEMS").is_ok() {
-            eprintln!("ℹ️  STEMMER_FORCE_CPU is set: using CPU only");
-        }
-        let session = commit_cpu_session(h.local_path.as_path(), num_threads)?;
-        SESSION.set(Mutex::new(session)).ok();
-        MANIFEST.set(h.manifest.clone()).ok();
-        return Ok(());
-    }
-
-    // Build provider list (may be empty)
-    let providers = get_execution_providers();
-
-    // Optional: print provider list names (for logs)
-    #[allow(unused_mut)]
-    let mut provider_names: Vec<&str> = Vec::new();
-    #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
-    provider_names.push("CUDA");
-    #[cfg(all(feature = "coreml", target_os = "macos"))]
-    provider_names.push("CoreML");
-    #[cfg(all(feature = "directml", target_os = "windows"))]
-    provider_names.push("DirectML (opt-in)");
-    #[cfg(feature = "onednn")]
-    provider_names.push("oneDNN");
-
-    if std::env::var("DEBUG_STEMS").is_ok() {
-        eprintln!("ℹ️  Configured EP candidates: {:?}", provider_names);
-    }
-
-    let session = commit_session_sequential_eps(h.local_path.as_path(), num_threads, providers)?;
-
-    SESSION.set(Mutex::new(session)).ok();
-    MANIFEST.set(h.manifest.clone()).ok();
-    Ok(())
-}
-
-#[cfg(not(feature = "engine-mock"))]
-pub fn manifest() -> &'static ModelManifest {
-    MANIFEST
-        .get()
-        .expect("engine::preload() must be called once before using the engine")
-}
-
-#[cfg(not(feature = "engine-mock"))]
-pub fn run_window_demucs(left: &[f32], right: &[f32]) -> Result<Array3<f32>> {
-    if left.len() != right.len() {
-        return Err(anyhow!("L/R length mismatch").into());
-    }
-    let t = left.len();
-    if t != DEMUCS_T {
-        return Err(anyhow!("Bad window length {} (expected {})", t, DEMUCS_T).into());
-    }
-
-    // Build time branch [1,2,T], planar
-    let mut planar = Vec::with_capacity(2 * t);
-    planar.extend_from_slice(left);
-    planar.extend_from_slice(right);
-    let time_value: Value = Tensor::from_array((vec![1, 2, t], planar))?.into_dyn();
-
-    // Build spec branch [1,4,F,Frames] with center padding, Hann, 4096/1024
-    let (spec_cac, f_bins, frames) = stft_cac_stereo_centered(left, right, DEMUCS_NFFT, DEMUCS_HOP);
-    if f_bins != DEMUCS_F || frames != DEMUCS_FRAMES {
-        return Err(anyhow!(
-            "Spec dims mismatch: got F={},Frames={}, expected F={},Frames={}",
-            f_bins,
-            frames,
-            DEMUCS_F,
-            DEMUCS_FRAMES
-        )
-        .into());
-    }
-    let spec_value: Value = Tensor::from_array((vec![1, 4, f_bins, frames], spec_cac))?.into_dyn();
-
-    let mut session = SESSION
-        .get()
-        .expect("engine::preload first")
-        .lock()
-        .expect("session poisoned");
-
-    // Get input names
     let in_time = session
         .inputs()
         .iter()
@@ -269,12 +199,8 @@ pub fn run_window_demucs(left: &[f32], right: &[f32]) -> Result<Array3<f32>> {
         .map(|i| i.name().to_owned())
         .ok_or_else(|| anyhow!("Model missing input 'x'"))?;
 
-    // Run inference
     let outputs = session.run(vec![(in_time, time_value), (in_spec, spec_value)])?;
 
-    // Extract both outputs from the model
-    // "output": frequency domain [1, sources, 4, F, Frames]
-    // "add_67": time domain [1, sources, 2, T]
     let mut output_freq: Option<Value> = None;
     let mut output_time: Option<Value> = None;
 
@@ -291,28 +217,24 @@ pub fn run_window_demucs(left: &[f32], right: &[f32]) -> Result<Array3<f32>> {
     let out_time =
         output_time.ok_or_else(|| anyhow!("Model did not return 'add_67' (time domain)"))?;
 
-    // Extract time domain output [1, 4, 2, T] -> [4, 2, T]
     let (shape_time, data_time) = out_time.try_extract_tensor::<f32>()?;
+    if shape_time.len() != 4
+        || shape_time[0] != 1
+        || shape_time[2] != 2
+        || shape_time[3] != t as i64
+    {
+        return Err(anyhow!(
+            "Unexpected time output shape: {:?}, expected [1, sources, 2, {}]",
+            shape_time,
+            t
+        )
+        .into());
+    }
     let num_sources = shape_time[1] as usize;
 
-    // Extract frequency domain output [1, sources, 4, F, Frames]
     let (shape_freq, data_freq) = out_freq.try_extract_tensor::<f32>()?;
-
-    // Debug: Check if model outputs are non-zero
-    if std::env::var("DEBUG_STEMS").is_ok() {
-        let time_max = data_time.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
-        let freq_max = data_freq.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
-        eprintln!(
-            "Model output stats: time_max={:.6}, freq_max={:.6}",
-            time_max, freq_max
-        );
-        if time_max < 1e-10 && freq_max < 1e-10 {
-            eprintln!("WARNING: Model outputs are all zeros! This indicates a problem with the execution provider.");
-        }
-    }
-
-    // Validate shapes
-    if shape_freq[0] != 1
+    if shape_freq.len() != 5
+        || shape_freq[0] != 1
         || shape_freq[1] != num_sources as i64
         || shape_freq[2] != 4
         || shape_freq[3] != f_bins as i64
@@ -328,18 +250,220 @@ pub fn run_window_demucs(left: &[f32], right: &[f32]) -> Result<Array3<f32>> {
         .into());
     }
 
+    let time_max = data_time.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
+    let freq_max = data_freq.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
+
+    Ok(DemucsRawOutput {
+        num_sources,
+        data_time: data_time.to_vec(),
+        data_freq: data_freq.to_vec(),
+        time_max,
+        freq_max,
+    })
+}
+
+#[cfg(not(feature = "engine-mock"))]
+fn run_demucs_raw_with_session(
+    session: &mut Session,
+    left: &[f32],
+    right: &[f32],
+) -> Result<DemucsRawOutput> {
+    if left.len() != right.len() {
+        return Err(anyhow!("L/R length mismatch").into());
+    }
+    let t = left.len();
+    if t != DEMUCS_T {
+        return Err(anyhow!("Bad window length {} (expected {})", t, DEMUCS_T).into());
+    }
+
+    let mut time_branch = Vec::with_capacity(2 * t);
+    time_branch.extend_from_slice(left);
+    time_branch.extend_from_slice(right);
+
+    let (spec_branch, f_bins, frames) =
+        stft_cac_stereo_centered(left, right, DEMUCS_NFFT, DEMUCS_HOP);
+    if f_bins != DEMUCS_F || frames != DEMUCS_FRAMES {
+        return Err(anyhow!(
+            "Spec dims mismatch: got F={},Frames={}, expected F={},Frames={}",
+            f_bins,
+            frames,
+            DEMUCS_F,
+            DEMUCS_FRAMES
+        )
+        .into());
+    }
+
+    run_demucs_raw_from_inputs(session, t, f_bins, frames, time_branch, spec_branch)
+}
+
+#[cfg(not(feature = "engine-mock"))]
+pub fn preload(h: &ModelHandle) -> Result<()> {
+    ORT_INIT.get_or_try_init::<_, StemError>(|| {
+        let _ = ort::init().commit();
+        Ok(())
+    })?;
+
+    let num_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+
+    let session = ep::create_best_session(
+        h.local_path.as_path(),
+        num_threads,
+        commit_cpu_session,
+        commit_ep_session,
+        |_| Ok(()),
+    )?;
+
+    ENGINE_CONTEXT
+        .set(EngineContext {
+            model_path: h.local_path.clone(),
+            num_threads,
+        })
+        .ok();
+    RUNTIME_EP_FALLBACK_USED.store(false, Ordering::Relaxed);
+
+    SESSION.set(Mutex::new(session)).ok();
+    MANIFEST.set(h.manifest.clone()).ok();
+    Ok(())
+}
+
+#[cfg(not(feature = "engine-mock"))]
+pub fn manifest() -> &'static ModelManifest {
+    MANIFEST
+        .get()
+        .expect("engine::preload() must be called once before using the engine")
+}
+
+#[cfg(not(feature = "engine-mock"))]
+const NEAR_SILENT_ERROR_PREFIX: &str = "near-silent execution output";
+
+#[cfg(not(feature = "engine-mock"))]
+fn output_is_near_silent(time_max: f32, freq_max: f32) -> bool {
+    time_max < 1e-6 && freq_max < 1e-3
+}
+
+#[cfg(not(feature = "engine-mock"))]
+fn input_is_near_silent(left: &[f32], right: &[f32]) -> bool {
+    let left_max = left.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
+    let right_max = right.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
+    left_max.max(right_max) < 1e-4
+}
+
+#[cfg(not(feature = "engine-mock"))]
+fn is_forced_non_cpu_ep() -> bool {
+    let Ok(value) = std::env::var("STEMMER_EP_FORCE") else {
+        return false;
+    };
+
+    let v = value.trim().to_ascii_lowercase();
+    !v.is_empty() && v != "cpu"
+}
+
+#[cfg(not(feature = "engine-mock"))]
+pub fn run_window_demucs(left: &[f32], right: &[f32]) -> Result<Array3<f32>> {
+    if left.len() != right.len() {
+        return Err(anyhow!("L/R length mismatch").into());
+    }
+    if left.len() != DEMUCS_T {
+        return Err(anyhow!("Bad window length {} (expected {})", left.len(), DEMUCS_T).into());
+    }
+
+    let mut session = SESSION
+        .get()
+        .expect("engine::preload first")
+        .lock()
+        .expect("session poisoned");
+
+    let debug_enabled = std::env::var("DEBUG_STEMS").is_ok();
+
+    match run_window_demucs_with_session(&mut session, left, right, debug_enabled) {
+        Ok(out) => Ok(out),
+        Err(e) if e.to_string().contains(NEAR_SILENT_ERROR_PREFIX) => {
+            if is_forced_non_cpu_ep() {
+                return Err(anyhow!(
+                    "Forced execution provider produced near-silent runtime output; refusing CPU fallback"
+                )
+                .into());
+            }
+
+            if RUNTIME_EP_FALLBACK_USED.swap(true, Ordering::SeqCst) {
+                return Err(e);
+            }
+
+            let ctx = ENGINE_CONTEXT
+                .get()
+                .ok_or_else(|| anyhow!("engine context missing for runtime fallback"))?;
+
+            if debug_enabled {
+                eprintln!(
+                    "⚠️  Runtime EP output was near-silent; switching to CPU and retrying this chunk"
+                );
+            }
+
+            let cpu_session = commit_cpu_session(&ctx.model_path, ctx.num_threads)?;
+            *session = cpu_session;
+
+            run_window_demucs_with_session(&mut session, left, right, debug_enabled)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(not(feature = "engine-mock"))]
+fn run_window_demucs_with_session(
+    session: &mut Session,
+    left: &[f32],
+    right: &[f32],
+    debug_enabled: bool,
+) -> Result<Array3<f32>> {
+    if left.len() != right.len() {
+        return Err(anyhow!("L/R length mismatch").into());
+    }
+    let t = left.len();
+    if t != DEMUCS_T {
+        return Err(anyhow!("Bad window length {} (expected {})", t, DEMUCS_T).into());
+    }
+
+    let raw = run_demucs_raw_with_session(session, left, right)?;
+    let num_sources = raw.num_sources;
+
+    // Debug: Check if model outputs are non-zero
+    if debug_enabled {
+        eprintln!(
+            "Model output stats: time_max={:.6}, freq_max={:.6}",
+            raw.time_max, raw.freq_max
+        );
+    }
+
+    if !input_is_near_silent(left, right) && output_is_near_silent(raw.time_max, raw.freq_max) {
+        return Err(anyhow!(
+            "{} (time_max={:.3e}, freq_max={:.3e})",
+            NEAR_SILENT_ERROR_PREFIX,
+            raw.time_max,
+            raw.freq_max
+        )
+        .into());
+    }
+
     let source_specs: Vec<&[f32]> = (0..num_sources)
         .map(|src| {
-            let src_freq_offset = src * 4 * f_bins * frames;
-            &data_freq[src_freq_offset..src_freq_offset + 4 * f_bins * frames]
+            let src_freq_offset = src * 4 * DEMUCS_F * DEMUCS_FRAMES;
+            &raw.data_freq[src_freq_offset..src_freq_offset + 4 * DEMUCS_F * DEMUCS_FRAMES]
         })
         .collect();
 
-    let istft_results =
-        istft_cac_stereo_parallel(&source_specs, f_bins, frames, DEMUCS_NFFT, DEMUCS_HOP, t);
+    let istft_results = istft_cac_stereo_parallel(
+        &source_specs,
+        DEMUCS_F,
+        DEMUCS_FRAMES,
+        DEMUCS_NFFT,
+        DEMUCS_HOP,
+        t,
+    );
 
     // Debug: Check iSTFT results
-    if std::env::var("DEBUG_STEMS").is_ok() {
+    if debug_enabled {
         for (src_idx, (left, right)) in istft_results.iter().enumerate() {
             let left_max = left.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
             let right_max = right.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
@@ -355,8 +479,8 @@ pub fn run_window_demucs(left: &[f32], right: &[f32]) -> Result<Array3<f32>> {
     for (src, (left_freq, right_freq)) in istft_results.into_iter().enumerate() {
         // Extract time domain for this source [2, T]
         let src_time_offset = src * 2 * t;
-        let left_time = &data_time[src_time_offset..src_time_offset + t];
-        let right_time = &data_time[src_time_offset + t..src_time_offset + 2 * t];
+        let left_time = &raw.data_time[src_time_offset..src_time_offset + t];
+        let right_time = &raw.data_time[src_time_offset + t..src_time_offset + 2 * t];
 
         // Combine: output = time_domain + frequency_domain (after iSTFT)
         for i in 0..t {

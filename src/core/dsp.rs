@@ -34,7 +34,7 @@ impl FftCache {
 
         // Need to create - use write lock
         let mut entries = self.entries.write().unwrap();
-        
+
         // Double-check after acquiring write lock
         if let Some(entry) = entries.get(&n_fft) {
             return Arc::clone(entry);
@@ -47,7 +47,7 @@ impl FftCache {
             fft_inverse: planner.plan_fft_inverse(n_fft),
             hann_window: compute_hann(n_fft),
         });
-        
+
         entries.insert(n_fft, Arc::clone(&entry));
         entry
     }
@@ -91,7 +91,7 @@ pub fn stft_cac_stereo_centered(
     hop: usize,
 ) -> (Vec<f32>, usize, usize) {
     assert_eq!(left.len(), right.len());
-    
+
     let t = left.len();
     let pad = n_fft / 2;
 
@@ -99,7 +99,7 @@ pub fn stft_cac_stereo_centered(
     let padded_len = pad + t + pad;
     let mut l_sig = vec![0.0f32; padded_len];
     let mut r_sig = vec![0.0f32; padded_len];
-    
+
     // Copy with padding
     l_sig[pad..pad + t].copy_from_slice(left);
     r_sig[pad..pad + t].copy_from_slice(right);
@@ -174,7 +174,7 @@ pub fn istft_cac_stereo(
     // Scratch buffers
     let mut buf_l = vec![Complex32::zero(); n_fft];
     let mut buf_r = vec![Complex32::zero(); n_fft];
-    
+
     let scale = 1.0 / (n_fft as f32);
 
     for fr in 0..frames {
@@ -257,7 +257,7 @@ pub fn istft_cac_stereo(
 
 /// Parallel iSTFT for multiple sources - processes all stems in parallel
 pub fn istft_cac_stereo_parallel(
-    sources_data: &[&[f32]],  // Slice of source spectrograms
+    sources_data: &[&[f32]], // Slice of source spectrograms
     f_bins: usize,
     frames: usize,
     n_fft: usize,
@@ -265,11 +265,9 @@ pub fn istft_cac_stereo_parallel(
     target_length: usize,
 ) -> Vec<(Vec<f32>, Vec<f32>)> {
     use rayon::prelude::*;
-    
+
     sources_data
         .par_iter()
-        .map(|spec_cac| {
-            istft_cac_stereo(spec_cac, f_bins, frames, n_fft, hop, target_length)
-        })
+        .map(|spec_cac| istft_cac_stereo(spec_cac, f_bins, frames, n_fft, hop, target_length))
         .collect()
 }

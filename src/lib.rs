@@ -5,6 +5,7 @@ pub mod core {
     pub mod audio;
     pub mod dsp;
     pub mod engine;
+    pub(crate) mod ep;
     pub mod splitter;
 }
 

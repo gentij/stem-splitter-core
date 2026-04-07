@@ -465,7 +465,31 @@ A: Yes! GPU acceleration is enabled by default and works across all platforms:
 - **Windows (any GPU)**: DirectML (NVIDIA, AMD, Intel)
 - **Intel**: oneDNN optimizations
 
-The library automatically detects available hardware and uses the best execution provider, falling back to CPU if no GPU is available. GPU mode significantly reduces CPU usage (~5x less) while maintaining similar processing speed.
+The library automatically detects available hardware, validates execution provider output during early inference, and falls back to CPU when a provider is unhealthy. This prevents "selected but silent" provider failures while keeping startup fast.
+
+You can control provider selection with environment variables:
+- `STEMMER_FORCE_CPU=1` — force CPU only
+- `STEMMER_EP_FORCE=cpu|cuda|coreml|directml|onednn` — force a specific provider (fails if unhealthy/unavailable)
+- `STEMMER_EP_DISABLE=coreml,directml,...` — disable providers from auto mode
+- `DEBUG_STEMS=1` — print provider selection and fallback diagnostics
+
+Optional ONNX Runtime thread tuning (advanced):
+- `STEMMER_ORT_INTRA_THREADS=<n>`
+- `STEMMER_ORT_INTER_THREADS=<n>`
+- `STEMMER_ORT_PARALLEL=0|1`
+
+**Q: GPU acceleration does not work on my machine. Can I skip it?**  
+A: Yes. If a provider is known to fail on your setup, disable it so it is not tried at all.
+
+Examples:
+- Skip CoreML on Apple Silicon (avoids repeated CoreML attempts):
+  - `STEMMER_EP_DISABLE=coreml cargo run --release --bin stem-splitter -- split --input song.mp3 --output ./out`
+- Force CPU-only mode (maximum stability):
+  - `STEMMER_FORCE_CPU=1 cargo run --release --bin stem-splitter -- split --input song.mp3 --output ./out`
+
+To apply this permanently in your shell:
+- `export STEMMER_EP_DISABLE=coreml`
+  (or `export STEMMER_FORCE_CPU=1`)
 
 **Q: What's the quality compared to Python Demucs?**  
 A: Identical quality - we use the same model architecture, just optimized for ONNX.
