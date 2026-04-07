@@ -491,6 +491,11 @@ To apply this permanently in your shell:
 - `export STEMMER_EP_DISABLE=coreml`
   (or `export STEMMER_FORCE_CPU=1`)
 
+Quick troubleshooting:
+- Silent stems or very low output with GPU: `STEMMER_EP_DISABLE=coreml` (macOS) or disable the failing provider.
+- GPU forced for debugging but still bad output: remove `STEMMER_EP_FORCE` and let auto mode fallback.
+- Need detailed provider logs: set `DEBUG_STEMS=1`.
+
 **Q: What's the quality compared to Python Demucs?**  
 A: Identical quality - we use the same model architecture, just optimized for ONNX.
 

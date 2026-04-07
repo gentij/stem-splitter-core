@@ -339,6 +339,13 @@ pub fn manifest() -> &'static ModelManifest {
 const NEAR_SILENT_ERROR_PREFIX: &str = "near-silent execution output";
 
 #[cfg(not(feature = "engine-mock"))]
+enum RuntimeFallbackDecision {
+    RetryOnCpu,
+    ForcedProviderError,
+    PropagateOriginal,
+}
+
+#[cfg(not(feature = "engine-mock"))]
 fn output_is_near_silent(time_max: f32, freq_max: f32) -> bool {
     time_max < 1e-6 && freq_max < 1e-3
 }
@@ -361,6 +368,29 @@ fn is_forced_non_cpu_ep() -> bool {
 }
 
 #[cfg(not(feature = "engine-mock"))]
+fn near_silent_error(message: &str) -> bool {
+    message.contains(NEAR_SILENT_ERROR_PREFIX)
+}
+
+#[cfg(not(feature = "engine-mock"))]
+fn runtime_fallback_decision(
+    error_text: &str,
+    forced_non_cpu_ep: bool,
+    fallback_already_used: bool,
+) -> RuntimeFallbackDecision {
+    if !near_silent_error(error_text) {
+        return RuntimeFallbackDecision::PropagateOriginal;
+    }
+    if forced_non_cpu_ep {
+        return RuntimeFallbackDecision::ForcedProviderError;
+    }
+    if fallback_already_used {
+        return RuntimeFallbackDecision::PropagateOriginal;
+    }
+    RuntimeFallbackDecision::RetryOnCpu
+}
+
+#[cfg(not(feature = "engine-mock"))]
 pub fn run_window_demucs(left: &[f32], right: &[f32]) -> Result<Array3<f32>> {
     if left.len() != right.len() {
         return Err(anyhow!("L/R length mismatch").into());
@@ -379,17 +409,35 @@ pub fn run_window_demucs(left: &[f32], right: &[f32]) -> Result<Array3<f32>> {
 
     match run_window_demucs_with_session(&mut session, left, right, debug_enabled) {
         Ok(out) => Ok(out),
-        Err(e) if e.to_string().contains(NEAR_SILENT_ERROR_PREFIX) => {
-            if is_forced_non_cpu_ep() {
-                return Err(anyhow!(
-                    "Forced execution provider produced near-silent runtime output; refusing CPU fallback"
-                )
-                .into());
+        Err(e) => {
+            let error_text = e.to_string();
+            let forced_non_cpu_ep = is_forced_non_cpu_ep();
+            let fallback_already_used = RUNTIME_EP_FALLBACK_USED.load(Ordering::SeqCst);
+
+            match runtime_fallback_decision(&error_text, forced_non_cpu_ep, fallback_already_used) {
+                RuntimeFallbackDecision::ForcedProviderError => {
+                    if debug_enabled {
+                        eprintln!(
+                            "⚠️  Runtime EP output was near-silent and STEMMER_EP_FORCE is set; refusing CPU fallback"
+                        );
+                    }
+                    return Err(anyhow!(
+                        "Forced execution provider produced near-silent runtime output; refusing CPU fallback"
+                    )
+                    .into());
+                }
+                RuntimeFallbackDecision::PropagateOriginal => {
+                    if near_silent_error(&error_text) && debug_enabled {
+                        eprintln!(
+                            "⚠️  Runtime EP output remained near-silent after fallback; propagating original error"
+                        );
+                    }
+                    return Err(e);
+                }
+                RuntimeFallbackDecision::RetryOnCpu => {}
             }
 
-            if RUNTIME_EP_FALLBACK_USED.swap(true, Ordering::SeqCst) {
-                return Err(e);
-            }
+            RUNTIME_EP_FALLBACK_USED.store(true, Ordering::SeqCst);
 
             let ctx = ENGINE_CONTEXT
                 .get()
@@ -404,9 +452,21 @@ pub fn run_window_demucs(left: &[f32], right: &[f32]) -> Result<Array3<f32>> {
             let cpu_session = commit_cpu_session(&ctx.model_path, ctx.num_threads)?;
             *session = cpu_session;
 
-            run_window_demucs_with_session(&mut session, left, right, debug_enabled)
+            match run_window_demucs_with_session(&mut session, left, right, debug_enabled) {
+                Ok(out) => {
+                    if debug_enabled {
+                        eprintln!("✅ Runtime fallback succeeded: CPU is now active");
+                    }
+                    Ok(out)
+                }
+                Err(retry_error) => {
+                    if debug_enabled {
+                        eprintln!("❌ Runtime fallback to CPU failed: {}", retry_error);
+                    }
+                    Err(retry_error)
+                }
+            }
         }
-        Err(e) => Err(e),
     }
 }
 
@@ -493,6 +553,72 @@ fn run_window_demucs_with_session(
 
     let out = ndarray::Array3::from_shape_vec((num_sources, 2, t), result)?;
     Ok(out)
+}
+
+#[cfg(not(feature = "engine-mock"))]
+#[cfg(test)]
+mod runtime_policy_tests {
+    use super::*;
+
+    #[test]
+    fn fallback_retries_on_cpu_when_near_silent_and_not_forced() {
+        let decision = runtime_fallback_decision(
+            "near-silent execution output (time_max=0, freq_max=0)",
+            false,
+            false,
+        );
+        assert!(matches!(decision, RuntimeFallbackDecision::RetryOnCpu));
+    }
+
+    #[test]
+    fn fallback_refuses_when_forced_provider() {
+        let decision = runtime_fallback_decision(
+            "near-silent execution output (time_max=0, freq_max=0)",
+            true,
+            false,
+        );
+        assert!(matches!(
+            decision,
+            RuntimeFallbackDecision::ForcedProviderError
+        ));
+    }
+
+    #[test]
+    fn fallback_does_not_retry_twice() {
+        let decision = runtime_fallback_decision(
+            "near-silent execution output (time_max=0, freq_max=0)",
+            false,
+            true,
+        );
+        assert!(matches!(
+            decision,
+            RuntimeFallbackDecision::PropagateOriginal
+        ));
+    }
+
+    #[test]
+    fn fallback_ignores_non_silent_errors() {
+        let decision = runtime_fallback_decision("Model missing input 'x'", false, false);
+        assert!(matches!(
+            decision,
+            RuntimeFallbackDecision::PropagateOriginal
+        ));
+    }
+
+    #[test]
+    fn near_silent_threshold_checks() {
+        assert!(output_is_near_silent(1e-7, 1e-4));
+        assert!(!output_is_near_silent(1e-4, 1e-4));
+        assert!(!output_is_near_silent(1e-7, 1e-2));
+    }
+
+    #[test]
+    fn input_silence_threshold_checks() {
+        let quiet = vec![0.0f32; 16];
+        let loud = vec![5e-4f32; 16];
+        assert!(input_is_near_silent(&quiet, &quiet));
+        assert!(!input_is_near_silent(&loud, &quiet));
+    }
 }
 
 #[cfg(feature = "engine-mock")]

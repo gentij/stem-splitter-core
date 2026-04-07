@@ -478,4 +478,30 @@ mod tests {
             .to_string();
         assert!(err_disable.contains("Unknown execution provider 'gpu' in STEMMER_EP_DISABLE"));
     }
+
+    #[test]
+    fn force_value_is_case_and_whitespace_insensitive() {
+        let req = resolve_ep_request_for_os("macos", false, Some("  CoReMl  "), None).unwrap();
+        assert_eq!(req.forced_kind, Some(EpKind::CoreML));
+        assert_eq!(req.kinds, vec![EpKind::CoreML]);
+    }
+
+    #[test]
+    fn disable_list_deduplicates_and_handles_aliases() {
+        let disabled = parse_disabled_ep_list(Some(" one_dnn, onednn, one-dnn , dnnl ")).unwrap();
+        assert_eq!(disabled, vec![EpKind::OneDNN]);
+    }
+
+    #[test]
+    fn empty_force_uses_default_order() {
+        let req = resolve_ep_request_for_os("linux", false, Some("   "), None).unwrap();
+        assert_eq!(req.kinds, vec![EpKind::Cuda, EpKind::OneDNN]);
+        assert_eq!(req.forced_kind, None);
+    }
+
+    #[test]
+    fn disable_cpu_is_rejected() {
+        let err = parse_disabled_ep_list(Some("cpu")).unwrap_err().to_string();
+        assert!(err.contains("'cpu' is not valid in STEMMER_EP_DISABLE"));
+    }
 }
