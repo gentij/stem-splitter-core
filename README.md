@@ -465,13 +465,15 @@ A: Yes! GPU acceleration is enabled by default and works across all platforms:
 - **Windows (any GPU)**: DirectML (NVIDIA, AMD, Intel)
 - **Intel**: oneDNN optimizations
 
-The library automatically detects available hardware, validates execution provider output during early inference, and falls back to CPU when a provider is unhealthy. This prevents "selected but silent" provider failures while keeping startup fast.
+The library automatically detects available hardware, validates execution provider output during early inference, and falls back to CPU when a provider is unhealthy. Unhealthy providers are cached per machine/model for 7 days so future runs skip known-bad EPs and start faster.
 
 You can control provider selection with environment variables:
 - `STEMMER_FORCE_CPU=1` — force CPU only
 - `STEMMER_EP_FORCE=cpu|cuda|coreml|directml|onednn` — force a specific provider (fails if unhealthy/unavailable)
 - `STEMMER_EP_DISABLE=coreml,directml,...` — disable providers from auto mode
 - `DEBUG_STEMS=1` — print provider selection and fallback diagnostics
+- `STEMMER_EP_CACHE_BYPASS=1` — ignore unhealthy EP cache for one run
+- `STEMMER_EP_CACHE_RESET=1` — clear unhealthy EP cache before selecting providers
 
 Optional ONNX Runtime thread tuning (advanced):
 - `STEMMER_ORT_INTRA_THREADS=<n>`
@@ -495,6 +497,8 @@ Quick troubleshooting:
 - Silent stems or very low output with GPU: `STEMMER_EP_DISABLE=coreml` (macOS) or disable the failing provider.
 - GPU forced for debugging but still bad output: remove `STEMMER_EP_FORCE` and let auto mode fallback.
 - Need detailed provider logs: set `DEBUG_STEMS=1`.
+- Need to retest a previously skipped GPU EP: use `STEMMER_EP_CACHE_BYPASS=1`.
+- Need to clear all remembered unhealthy EPs: use `STEMMER_EP_CACHE_RESET=1`.
 
 **Q: What's the quality compared to Python Demucs?**  
 A: Identical quality - we use the same model architecture, just optimized for ONNX.

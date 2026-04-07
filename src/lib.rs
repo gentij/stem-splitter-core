@@ -16,6 +16,7 @@ pub mod model {
 
 pub mod io {
     pub mod crypto;
+    pub(crate) mod ep_cache;
     pub mod net;
     pub mod paths;
     pub mod progress;

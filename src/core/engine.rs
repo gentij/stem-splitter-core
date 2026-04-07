@@ -6,6 +6,7 @@ use crate::{
         ep,
     },
     error::{Result, StemError},
+    io::ep_cache,
     model::model_manager::ModelHandle,
     types::ModelManifest,
 };
@@ -46,6 +47,7 @@ const DEMUCS_HOP: usize = 1024;
 struct EngineContext {
     model_path: PathBuf,
     num_threads: usize,
+    selected_kind: ep::EpKind,
 }
 
 #[cfg(not(feature = "engine-mock"))]
@@ -307,7 +309,7 @@ pub fn preload(h: &ModelHandle) -> Result<()> {
         .map(|n| n.get())
         .unwrap_or(4);
 
-    let session = ep::create_best_session(
+    let selected = ep::create_best_session(
         h.local_path.as_path(),
         num_threads,
         commit_cpu_session,
@@ -319,11 +321,12 @@ pub fn preload(h: &ModelHandle) -> Result<()> {
         .set(EngineContext {
             model_path: h.local_path.clone(),
             num_threads,
+            selected_kind: selected.kind,
         })
         .ok();
     RUNTIME_EP_FALLBACK_USED.store(false, Ordering::Relaxed);
 
-    SESSION.set(Mutex::new(session)).ok();
+    SESSION.set(Mutex::new(selected.session)).ok();
     MANIFEST.set(h.manifest.clone()).ok();
     Ok(())
 }
@@ -442,6 +445,26 @@ pub fn run_window_demucs(left: &[f32], right: &[f32]) -> Result<Array3<f32>> {
             let ctx = ENGINE_CONTEXT
                 .get()
                 .ok_or_else(|| anyhow!("engine context missing for runtime fallback"))?;
+
+            if ctx.selected_kind != ep::EpKind::Cpu {
+                if let Err(cache_err) = ep_cache::mark_unhealthy(
+                    ctx.selected_kind.env_name(),
+                    &ctx.model_path,
+                    &error_text,
+                ) {
+                    if debug_enabled {
+                        eprintln!(
+                            "⚠️  Failed to persist unhealthy EP cache entry: {}",
+                            cache_err
+                        );
+                    }
+                } else if debug_enabled {
+                    eprintln!(
+                        "ℹ️  Marked {} as unhealthy for this model (cached for 7 days)",
+                        ctx.selected_kind.label()
+                    );
+                }
+            }
 
             if debug_enabled {
                 eprintln!(

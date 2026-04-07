@@ -9,3 +9,11 @@ pub fn models_cache_dir() -> Result<PathBuf> {
     p.push("models");
     Ok(p)
 }
+
+pub fn ep_cache_file() -> Result<PathBuf> {
+    let proj = ProjectDirs::from("dev", "StemSplitter", "stem-splitter-core")
+        .ok_or(StemError::CacheDirUnavailable)?;
+    let mut p = PathBuf::from(proj.cache_dir());
+    p.push("ep_health_v1.json");
+    Ok(p)
+}

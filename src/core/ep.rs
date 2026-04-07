@@ -1,6 +1,6 @@
 #![cfg_attr(feature = "engine-mock", allow(dead_code))]
 
-use crate::error::Result;
+use crate::{error::Result, io::ep_cache};
 
 use anyhow::anyhow;
 use ort::{
@@ -32,7 +32,7 @@ pub(crate) enum EpKind {
 }
 
 impl EpKind {
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             EpKind::Cpu => "CPU",
             EpKind::Cuda => "CUDA",
@@ -42,7 +42,7 @@ impl EpKind {
         }
     }
 
-    fn env_name(self) -> &'static str {
+    pub(crate) fn env_name(self) -> &'static str {
         match self {
             EpKind::Cpu => "cpu",
             EpKind::Cuda => "cuda",
@@ -72,19 +72,26 @@ impl EpCandidate {
     }
 }
 
+pub(crate) struct SelectedSession {
+    pub(crate) session: Session,
+    pub(crate) kind: EpKind,
+}
+
 pub(crate) fn create_best_session<FCpu, FEp, FProbe>(
     model_path: &Path,
     num_threads: usize,
     mut build_cpu_session: FCpu,
     mut build_ep_session: FEp,
     mut probe_session: FProbe,
-) -> Result<Session>
+) -> Result<SelectedSession>
 where
     FCpu: FnMut(&Path, usize) -> Result<Session>,
     FEp: FnMut(&Path, usize, EpKind, ExecutionProviderDispatch) -> Result<Session>,
     FProbe: FnMut(&mut Session) -> Result<()>,
 {
     let debug_enabled = is_debug_enabled();
+    ep_cache::maybe_reset_from_env()?;
+    let cache_bypass = ep_cache::cache_bypass_enabled();
     let request = resolve_ep_request_from_env()?;
 
     if request.force_cpu {
@@ -96,7 +103,10 @@ where
         if debug_enabled {
             eprintln!("✅ Execution provider selected: CPU");
         }
-        return build_cpu_session(model_path, num_threads);
+        return Ok(SelectedSession {
+            session: build_cpu_session(model_path, num_threads)?,
+            kind: EpKind::Cpu,
+        });
     }
 
     if let Some(kind) = request.forced_kind {
@@ -107,6 +117,23 @@ where
 
     let mut providers: Vec<EpCandidate> = Vec::new();
     for kind in request.kinds {
+        let cached_reason = ep_cache::is_unhealthy(kind.env_name(), model_path)?;
+        if should_skip_due_to_cache(
+            kind,
+            request.forced_kind,
+            cache_bypass,
+            cached_reason.as_deref(),
+        ) {
+            if debug_enabled {
+                eprintln!(
+                    "ℹ️  Skipping {} from EP health cache: {} (set STEMMER_EP_CACHE_BYPASS=1 to retry)",
+                    kind.label(),
+                    cached_reason.unwrap_or_default()
+                );
+            }
+            continue;
+        }
+
         match try_build_execution_provider(kind) {
             Ok(dispatch) => providers.push(EpCandidate { kind, dispatch }),
             Err(reason) => {
@@ -173,7 +200,10 @@ where
                         idx + 1
                     );
                 }
-                return Ok(session);
+                return Ok(SelectedSession {
+                    session,
+                    kind: candidate.kind,
+                });
             }
             Err(e) => {
                 if request.forced_kind == Some(candidate.kind) {
@@ -210,11 +240,23 @@ where
         eprintln!("✅ Execution provider selected: CPU");
     }
 
-    Ok(session)
+    Ok(SelectedSession {
+        session,
+        kind: EpKind::Cpu,
+    })
 }
 
 fn is_debug_enabled() -> bool {
     std::env::var("DEBUG_STEMS").is_ok()
+}
+
+fn should_skip_due_to_cache(
+    kind: EpKind,
+    forced_kind: Option<EpKind>,
+    cache_bypass: bool,
+    cached_reason: Option<&str>,
+) -> bool {
+    forced_kind != Some(kind) && !cache_bypass && cached_reason.is_some()
 }
 
 fn parse_ep_kind(value: &str) -> Option<EpKind> {
@@ -503,5 +545,28 @@ mod tests {
     fn disable_cpu_is_rejected() {
         let err = parse_disabled_ep_list(Some("cpu")).unwrap_err().to_string();
         assert!(err.contains("'cpu' is not valid in STEMMER_EP_DISABLE"));
+    }
+
+    #[test]
+    fn cache_skip_rules_respect_force_and_bypass() {
+        assert!(should_skip_due_to_cache(
+            EpKind::CoreML,
+            None,
+            false,
+            Some("near-silent runtime output")
+        ));
+        assert!(!should_skip_due_to_cache(
+            EpKind::CoreML,
+            Some(EpKind::CoreML),
+            false,
+            Some("near-silent runtime output")
+        ));
+        assert!(!should_skip_due_to_cache(
+            EpKind::CoreML,
+            None,
+            true,
+            Some("near-silent runtime output")
+        ));
+        assert!(!should_skip_due_to_cache(EpKind::CoreML, None, false, None));
     }
 }
