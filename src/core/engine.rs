@@ -106,7 +106,10 @@ fn commit_session_sequential_eps(
 ) -> Result<Session> {
     if providers.is_empty() {
         if std::env::var("DEBUG_STEMS").is_ok() {
-            eprintln!("ℹ️  Using CPU ({} threads) - no GPU features enabled", num_threads);
+            eprintln!(
+                "ℹ️  Using CPU ({} threads) - no GPU features enabled",
+                num_threads
+            );
         }
         return commit_cpu_session(model_path, num_threads);
     }
@@ -152,16 +155,18 @@ fn commit_session_sequential_eps(
     }
 
     if std::env::var("DEBUG_STEMS").is_ok() {
-        eprintln!("⚠️  All EPs failed; falling back to CPU ({} threads)", num_threads);
+        eprintln!(
+            "⚠️  All EPs failed; falling back to CPU ({} threads)",
+            num_threads
+        );
     }
     commit_cpu_session(model_path, num_threads)
 }
 
-
 #[cfg(not(feature = "engine-mock"))]
 pub fn preload(h: &ModelHandle) -> Result<()> {
     ORT_INIT.get_or_try_init::<_, StemError>(|| {
-        ort::init().commit().map_err(StemError::from)?;
+        let _ = ort::init().commit();
         Ok(())
     })?;
 
@@ -251,17 +256,17 @@ pub fn run_window_demucs(left: &[f32], right: &[f32]) -> Result<Array3<f32>> {
 
     // Get input names
     let in_time = session
-        .inputs
+        .inputs()
         .iter()
-        .find(|i| i.name == "input")
-        .map(|i| i.name.clone())
+        .find(|i| i.name() == "input")
+        .map(|i| i.name().to_owned())
         .ok_or_else(|| anyhow!("Model missing input 'input'"))?;
 
     let in_spec = session
-        .inputs
+        .inputs()
         .iter()
-        .find(|i| i.name == "x")
-        .map(|i| i.name.clone())
+        .find(|i| i.name() == "x")
+        .map(|i| i.name().to_owned())
         .ok_or_else(|| anyhow!("Model missing input 'x'"))?;
 
     // Run inference
