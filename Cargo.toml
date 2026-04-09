@@ -49,7 +49,7 @@ httpmock = "0.7"              # to simulate remote manifest/model servers
 tempfile = "3.8"              # also used in tests for isolated dirs
 
 [features]
-default = ["cuda", "coreml", "directml", "onednn"]
+default = ["cuda", "coreml", "directml", "onednn", "xnnpack"]
 engine-mock = []
 
 # GPU acceleration providers - enable all by default, code handles platform detection
@@ -58,6 +58,7 @@ cuda = ["ort/cuda"]           # NVIDIA GPUs (Linux, Windows)
 coreml = ["ort/coreml"]       # Apple Silicon (macOS only)  
 directml = ["ort/directml"]   # DirectML (Windows only)
 onednn = ["ort/onednn"]       # Intel optimized (all platforms)
+xnnpack = ["ort/xnnpack"]     # ARM/x86 optimized CPU fallback
 
 [[bin]]
 name = "stem-splitter"

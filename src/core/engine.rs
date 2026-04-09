@@ -2,7 +2,9 @@
 
 use crate::{
     core::{
-        dsp::{istft_cac_stereo_parallel, stft_cac_stereo_centered},
+        dsp::{
+            istft_cac_stereo_sources_add_into, stft_cac_stereo_centered_into, IstftBatchWorkspace,
+        },
         ep,
     },
     error::{Result, StemError},
@@ -19,7 +21,7 @@ use ort::{
         builder::{GraphOptimizationLevel, SessionBuilder},
         Session,
     },
-    value::{Tensor, Value},
+    value::{TensorRef, Value},
 };
 use std::{
     path::PathBuf,
@@ -27,11 +29,22 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Mutex,
     },
+    time::Instant,
 };
 
 static SESSION: OnceCell<Mutex<Session>> = OnceCell::new();
 static MANIFEST: OnceCell<ModelManifest> = OnceCell::new();
 static ORT_INIT: OnceCell<()> = OnceCell::new();
+#[cfg(not(feature = "engine-mock"))]
+static ENGINE_IO_SPEC: OnceCell<EngineIoSpec> = OnceCell::new();
+#[cfg(not(feature = "engine-mock"))]
+static ENGINE_PERF: OnceCell<EnginePerfConfig> = OnceCell::new();
+#[cfg(not(feature = "engine-mock"))]
+static INPUT_SCRATCH: OnceCell<Mutex<InferenceScratch>> = OnceCell::new();
+#[cfg(not(feature = "engine-mock"))]
+static ISTFT_SCRATCH: OnceCell<Mutex<IstftBatchWorkspace>> = OnceCell::new();
+#[cfg(not(feature = "engine-mock"))]
+static PRELOAD_PROBE_INPUT: OnceCell<(Vec<f32>, Vec<f32>)> = OnceCell::new();
 #[cfg(not(feature = "engine-mock"))]
 static ENGINE_CONTEXT: OnceCell<EngineContext> = OnceCell::new();
 #[cfg(not(feature = "engine-mock"))]
@@ -65,6 +78,55 @@ struct OrtThreading {
     intra_threads: usize,
     inter_threads: usize,
     parallel_execution: bool,
+}
+
+#[cfg(not(feature = "engine-mock"))]
+#[derive(Clone, Copy)]
+struct EngineIoSpec {
+    use_positional_inputs: bool,
+}
+
+#[cfg(not(feature = "engine-mock"))]
+#[derive(Clone, Copy)]
+struct EnginePerfConfig {
+    enabled: bool,
+}
+
+#[cfg(not(feature = "engine-mock"))]
+#[derive(Default)]
+struct WindowPerf {
+    prep_ns: u128,
+    stft_ns: u128,
+    lock_wait_ns: u128,
+    run_ns: u128,
+    extract_ns: u128,
+    decode_ns: u128,
+    istft_ns: u128,
+    mix_ns: u128,
+    total_ns: u128,
+}
+
+#[cfg(not(feature = "engine-mock"))]
+#[derive(Default)]
+struct InferenceScratch {
+    time_branch: Vec<f32>,
+    spec_branch: Vec<f32>,
+}
+
+#[cfg(not(feature = "engine-mock"))]
+impl InferenceScratch {
+    fn with_demucs_capacity() -> Self {
+        Self {
+            time_branch: Vec::with_capacity(2 * DEMUCS_T),
+            spec_branch: Vec::with_capacity(4 * DEMUCS_F * DEMUCS_FRAMES),
+        }
+    }
+
+    fn fill_time_branch(&mut self, left: &[f32], right: &[f32]) {
+        self.time_branch.clear();
+        self.time_branch.extend_from_slice(left);
+        self.time_branch.extend_from_slice(right);
+    }
 }
 
 #[cfg(not(feature = "engine-mock"))]
@@ -103,6 +165,77 @@ fn apply_thread_overrides(mut cfg: OrtThreading) -> OrtThreading {
 }
 
 #[cfg(not(feature = "engine-mock"))]
+fn perf_config() -> &'static EnginePerfConfig {
+    ENGINE_PERF.get_or_init(|| EnginePerfConfig {
+        enabled: std::env::var("STEMMER_PERF").is_ok(),
+    })
+}
+
+#[cfg(not(feature = "engine-mock"))]
+fn input_scratch() -> &'static Mutex<InferenceScratch> {
+    INPUT_SCRATCH.get_or_init(|| Mutex::new(InferenceScratch::with_demucs_capacity()))
+}
+
+#[cfg(not(feature = "engine-mock"))]
+fn istft_scratch() -> &'static Mutex<IstftBatchWorkspace> {
+    ISTFT_SCRATCH.get_or_init(|| Mutex::new(IstftBatchWorkspace::default()))
+}
+
+#[cfg(not(feature = "engine-mock"))]
+fn io_spec() -> &'static EngineIoSpec {
+    ENGINE_IO_SPEC
+        .get()
+        .expect("engine::preload() must initialize input binding")
+}
+
+#[cfg(not(feature = "engine-mock"))]
+fn use_positional_inputs(input_names: &[&str]) -> bool {
+    matches!(input_names, ["input", "x"])
+}
+
+#[cfg(not(feature = "engine-mock"))]
+fn inspect_engine_io(session: &Session) -> Result<EngineIoSpec> {
+    let input_names: Vec<&str> = session.inputs().iter().map(|input| input.name()).collect();
+    let output_names: Vec<&str> = session
+        .outputs()
+        .iter()
+        .map(|output| output.name())
+        .collect();
+
+    if !output_names.contains(&"output") {
+        return Err(anyhow!("Model missing output 'output' (freq domain)").into());
+    }
+    if !output_names.contains(&"add_67") {
+        return Err(anyhow!("Model missing output 'add_67' (time domain)").into());
+    }
+
+    Ok(EngineIoSpec {
+        use_positional_inputs: use_positional_inputs(&input_names),
+    })
+}
+
+#[cfg(not(feature = "engine-mock"))]
+fn format_ms(ns: u128) -> f64 {
+    ns as f64 / 1_000_000.0
+}
+
+#[cfg(not(feature = "engine-mock"))]
+fn log_window_perf(perf: &WindowPerf) {
+    eprintln!(
+        "⏱️  window total={:.2}ms prep={:.2}ms stft={:.2}ms lock={:.2}ms run={:.2}ms extract={:.2}ms decode={:.2}ms istft={:.2}ms mix={:.2}ms",
+        format_ms(perf.total_ns),
+        format_ms(perf.prep_ns),
+        format_ms(perf.stft_ns),
+        format_ms(perf.lock_wait_ns),
+        format_ms(perf.run_ns),
+        format_ms(perf.extract_ns),
+        format_ms(perf.decode_ns),
+        format_ms(perf.istft_ns),
+        format_ms(perf.mix_ns),
+    );
+}
+
+#[cfg(not(feature = "engine-mock"))]
 fn cpu_threading(num_threads: usize) -> OrtThreading {
     let base = OrtThreading {
         intra_threads: num_threads.max(1),
@@ -122,6 +255,11 @@ fn ep_threading(kind: ep::EpKind, num_threads: usize) -> OrtThreading {
         },
         ep::EpKind::OneDNN | ep::EpKind::Cpu => OrtThreading {
             intra_threads: num_threads.max(1),
+            inter_threads: 1,
+            parallel_execution: false,
+        },
+        ep::EpKind::Xnnpack => OrtThreading {
+            intra_threads: 1,
             inter_threads: 1,
             parallel_execution: false,
         },
@@ -164,12 +302,18 @@ fn commit_ep_session(
         );
     }
 
-    let builder = SessionBuilder::new()?
+    let mut builder = SessionBuilder::new()?
         .with_optimization_level(GraphOptimizationLevel::Level3)?
         .with_intra_threads(threading.intra_threads)?
         .with_inter_threads(threading.inter_threads)?
         .with_parallel_execution(threading.parallel_execution)?
         .with_execution_providers(vec![provider])?;
+
+    if matches!(kind, ep::EpKind::Xnnpack) {
+        builder = builder
+            .with_intra_op_spinning(false)?
+            .with_inter_op_spinning(false)?;
+    }
 
     Ok(builder.commit_from_file(model_path)?)
 }
@@ -177,47 +321,53 @@ fn commit_ep_session(
 #[cfg(not(feature = "engine-mock"))]
 fn run_demucs_raw_from_inputs(
     session: &mut Session,
+    io_spec: &EngineIoSpec,
     t: usize,
     f_bins: usize,
     frames: usize,
-    time_branch: Vec<f32>,
-    spec_branch: Vec<f32>,
-) -> Result<DemucsRawOutput> {
-    let time_value: Value = Tensor::from_array((vec![1, 2, t], time_branch))?.into_dyn();
-    let spec_value: Value =
-        Tensor::from_array((vec![1, 4, f_bins, frames], spec_branch))?.into_dyn();
+    time_branch: &[f32],
+    spec_branch: &[f32],
+    perf_enabled: bool,
+    perf: &mut WindowPerf,
+) -> Result<(Value, Value)> {
+    let time_value = TensorRef::from_array_view(([1usize, 2, t], time_branch))?;
+    let spec_value = TensorRef::from_array_view(([1usize, 4, f_bins, frames], spec_branch))?;
 
-    let in_time = session
-        .inputs()
-        .iter()
-        .find(|i| i.name() == "input")
-        .map(|i| i.name().to_owned())
-        .ok_or_else(|| anyhow!("Model missing input 'input'"))?;
-
-    let in_spec = session
-        .inputs()
-        .iter()
-        .find(|i| i.name() == "x")
-        .map(|i| i.name().to_owned())
-        .ok_or_else(|| anyhow!("Model missing input 'x'"))?;
-
-    let outputs = session.run(vec![(in_time, time_value), (in_spec, spec_value)])?;
-
-    let mut output_freq: Option<Value> = None;
-    let mut output_time: Option<Value> = None;
-
-    for (name, val) in outputs.into_iter() {
-        if name == "output" {
-            output_freq = Some(val);
-        } else if name == "add_67" {
-            output_time = Some(val);
-        }
+    let run_start = perf_enabled.then(Instant::now);
+    let mut outputs = if io_spec.use_positional_inputs {
+        session.run(ort::inputs![time_value, spec_value])?
+    } else {
+        session.run(ort::inputs!["input" => time_value, "x" => spec_value])?
+    };
+    if let Some(start) = run_start {
+        perf.run_ns += start.elapsed().as_nanos();
     }
 
-    let out_freq =
-        output_freq.ok_or_else(|| anyhow!("Model did not return 'output' (freq domain)"))?;
-    let out_time =
-        output_time.ok_or_else(|| anyhow!("Model did not return 'add_67' (time domain)"))?;
+    let extract_start = perf_enabled.then(Instant::now);
+    let out_freq = outputs
+        .remove("output")
+        .ok_or_else(|| anyhow!("Model did not return 'output' (freq domain)"))?;
+    let out_time = outputs
+        .remove("add_67")
+        .ok_or_else(|| anyhow!("Model did not return 'add_67' (time domain)"))?;
+    if let Some(start) = extract_start {
+        perf.extract_ns += start.elapsed().as_nanos();
+    }
+
+    Ok((out_time, out_freq))
+}
+
+#[cfg(not(feature = "engine-mock"))]
+fn decode_demucs_outputs(
+    out_time: Value,
+    out_freq: Value,
+    t: usize,
+    f_bins: usize,
+    frames: usize,
+    perf_enabled: bool,
+    perf: &mut WindowPerf,
+) -> Result<DemucsRawOutput> {
+    let decode_start = perf_enabled.then(Instant::now);
 
     let (shape_time, data_time) = out_time.try_extract_tensor::<f32>()?;
     if shape_time.len() != 4
@@ -255,21 +405,29 @@ fn run_demucs_raw_from_inputs(
     let time_max = data_time.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
     let freq_max = data_freq.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
 
-    Ok(DemucsRawOutput {
+    let raw = DemucsRawOutput {
         num_sources,
         data_time: data_time.to_vec(),
         data_freq: data_freq.to_vec(),
         time_max,
         freq_max,
-    })
+    };
+
+    if let Some(start) = decode_start {
+        perf.decode_ns += start.elapsed().as_nanos();
+    }
+
+    Ok(raw)
 }
 
 #[cfg(not(feature = "engine-mock"))]
-fn run_demucs_raw_with_session(
-    session: &mut Session,
+fn prepare_demucs_inputs(
     left: &[f32],
     right: &[f32],
-) -> Result<DemucsRawOutput> {
+    scratch: &mut InferenceScratch,
+    perf_enabled: bool,
+    perf: &mut WindowPerf,
+) -> Result<(usize, usize, usize)> {
     if left.len() != right.len() {
         return Err(anyhow!("L/R length mismatch").into());
     }
@@ -278,12 +436,20 @@ fn run_demucs_raw_with_session(
         return Err(anyhow!("Bad window length {} (expected {})", t, DEMUCS_T).into());
     }
 
-    let mut time_branch = Vec::with_capacity(2 * t);
-    time_branch.extend_from_slice(left);
-    time_branch.extend_from_slice(right);
+    let prep_start = perf_enabled.then(Instant::now);
+    scratch.fill_time_branch(left, right);
 
-    let (spec_branch, f_bins, frames) =
-        stft_cac_stereo_centered(left, right, DEMUCS_NFFT, DEMUCS_HOP);
+    let stft_start = perf_enabled.then(Instant::now);
+    let (f_bins, frames) = stft_cac_stereo_centered_into(
+        left,
+        right,
+        DEMUCS_NFFT,
+        DEMUCS_HOP,
+        &mut scratch.spec_branch,
+    );
+    if let Some(start) = stft_start {
+        perf.stft_ns += start.elapsed().as_nanos();
+    }
     if f_bins != DEMUCS_F || frames != DEMUCS_FRAMES {
         return Err(anyhow!(
             "Spec dims mismatch: got F={},Frames={}, expected F={},Frames={}",
@@ -295,7 +461,36 @@ fn run_demucs_raw_with_session(
         .into());
     }
 
-    run_demucs_raw_from_inputs(session, t, f_bins, frames, time_branch, spec_branch)
+    if let Some(start) = prep_start {
+        perf.prep_ns += start.elapsed().as_nanos();
+    }
+
+    Ok((t, f_bins, frames))
+}
+
+#[cfg(not(feature = "engine-mock"))]
+fn run_demucs_raw_with_session(
+    session: &mut Session,
+    io_spec: &EngineIoSpec,
+    scratch: &mut InferenceScratch,
+    left: &[f32],
+    right: &[f32],
+    perf_enabled: bool,
+    perf: &mut WindowPerf,
+) -> Result<DemucsRawOutput> {
+    let (t, f_bins, frames) = prepare_demucs_inputs(left, right, scratch, perf_enabled, perf)?;
+    let (out_time, out_freq) = run_demucs_raw_from_inputs(
+        session,
+        io_spec,
+        t,
+        f_bins,
+        frames,
+        &scratch.time_branch,
+        &scratch.spec_branch,
+        perf_enabled,
+        perf,
+    )?;
+    decode_demucs_outputs(out_time, out_freq, t, f_bins, frames, perf_enabled, perf)
 }
 
 #[cfg(not(feature = "engine-mock"))]
@@ -314,8 +509,29 @@ pub fn preload(h: &ModelHandle) -> Result<()> {
         num_threads,
         commit_cpu_session,
         commit_ep_session,
-        |_| Ok(()),
+        probe_session_health,
     )?;
+
+    let selected_io = inspect_engine_io(&selected.session)?;
+    ENGINE_IO_SPEC.set(selected_io).ok();
+    ENGINE_PERF.set(*perf_config()).ok();
+    INPUT_SCRATCH
+        .set(Mutex::new(InferenceScratch::with_demucs_capacity()))
+        .ok();
+    ISTFT_SCRATCH
+        .set(Mutex::new(IstftBatchWorkspace::default()))
+        .ok();
+
+    if std::env::var("DEBUG_STEMS").is_ok() {
+        eprintln!(
+            "ℹ️  Engine input binding: {}",
+            if selected_io.use_positional_inputs {
+                "positional"
+            } else {
+                "named"
+            }
+        );
+    }
 
     ENGINE_CONTEXT
         .set(EngineContext {
@@ -361,6 +577,65 @@ fn input_is_near_silent(left: &[f32], right: &[f32]) -> bool {
 }
 
 #[cfg(not(feature = "engine-mock"))]
+fn build_preload_probe_input() -> (Vec<f32>, Vec<f32>) {
+    use std::f32::consts::TAU;
+
+    let sample_rate = 44_100.0f32;
+    let mut left = Vec::with_capacity(DEMUCS_T);
+    let mut right = Vec::with_capacity(DEMUCS_T);
+
+    for i in 0..DEMUCS_T {
+        let t = i as f32 / sample_rate;
+        left.push(0.22 * (TAU * 220.0 * t).sin() + 0.11 * (TAU * 660.0 * t).sin());
+        right.push(0.20 * (TAU * 330.0 * t).sin() + 0.09 * (TAU * 880.0 * t).cos());
+    }
+
+    (left, right)
+}
+
+#[cfg(not(feature = "engine-mock"))]
+fn preload_probe_input() -> &'static (Vec<f32>, Vec<f32>) {
+    PRELOAD_PROBE_INPUT.get_or_init(build_preload_probe_input)
+}
+
+#[cfg(not(feature = "engine-mock"))]
+fn ensure_output_is_not_near_silent(
+    left: &[f32],
+    right: &[f32],
+    raw: &DemucsRawOutput,
+) -> Result<()> {
+    if !input_is_near_silent(left, right) && output_is_near_silent(raw.time_max, raw.freq_max) {
+        return Err(anyhow!(
+            "{} (time_max={:.3e}, freq_max={:.3e})",
+            NEAR_SILENT_ERROR_PREFIX,
+            raw.time_max,
+            raw.freq_max
+        )
+        .into());
+    }
+
+    Ok(())
+}
+
+#[cfg(not(feature = "engine-mock"))]
+fn probe_session_health(session: &mut Session) -> Result<()> {
+    let (left, right) = preload_probe_input();
+    let io_spec = inspect_engine_io(session)?;
+    let mut scratch = InferenceScratch::with_demucs_capacity();
+    let mut perf = WindowPerf::default();
+    let raw = run_demucs_raw_with_session(
+        session,
+        &io_spec,
+        &mut scratch,
+        left,
+        right,
+        false,
+        &mut perf,
+    )?;
+    ensure_output_is_not_near_silent(left, right, &raw)
+}
+
+#[cfg(not(feature = "engine-mock"))]
 fn is_forced_non_cpu_ep() -> bool {
     let Ok(value) = std::env::var("STEMMER_EP_FORCE") else {
         return false;
@@ -402,15 +677,10 @@ pub fn run_window_demucs(left: &[f32], right: &[f32]) -> Result<Array3<f32>> {
         return Err(anyhow!("Bad window length {} (expected {})", left.len(), DEMUCS_T).into());
     }
 
-    let mut session = SESSION
-        .get()
-        .expect("engine::preload first")
-        .lock()
-        .expect("session poisoned");
-
     let debug_enabled = std::env::var("DEBUG_STEMS").is_ok();
+    let perf_enabled = perf_config().enabled;
 
-    match run_window_demucs_with_session(&mut session, left, right, debug_enabled) {
+    match run_window_demucs_once(left, right, debug_enabled, perf_enabled) {
         Ok(out) => Ok(out),
         Err(e) => {
             let error_text = e.to_string();
@@ -473,9 +743,15 @@ pub fn run_window_demucs(left: &[f32], right: &[f32]) -> Result<Array3<f32>> {
             }
 
             let cpu_session = commit_cpu_session(&ctx.model_path, ctx.num_threads)?;
+            let mut session = SESSION
+                .get()
+                .expect("engine::preload first")
+                .lock()
+                .expect("session poisoned");
             *session = cpu_session;
+            drop(session);
 
-            match run_window_demucs_with_session(&mut session, left, right, debug_enabled) {
+            match run_window_demucs_once(left, right, debug_enabled, perf_enabled) {
                 Ok(out) => {
                     if debug_enabled {
                         eprintln!("✅ Runtime fallback succeeded: CPU is now active");
@@ -494,24 +770,77 @@ pub fn run_window_demucs(left: &[f32], right: &[f32]) -> Result<Array3<f32>> {
 }
 
 #[cfg(not(feature = "engine-mock"))]
-fn run_window_demucs_with_session(
-    session: &mut Session,
+fn run_window_demucs_once(
     left: &[f32],
     right: &[f32],
     debug_enabled: bool,
+    perf_enabled: bool,
 ) -> Result<Array3<f32>> {
-    if left.len() != right.len() {
-        return Err(anyhow!("L/R length mismatch").into());
-    }
-    let t = left.len();
-    if t != DEMUCS_T {
-        return Err(anyhow!("Bad window length {} (expected {})", t, DEMUCS_T).into());
+    let total_start = perf_enabled.then(Instant::now);
+    let mut perf = WindowPerf::default();
+
+    let raw = {
+        let mut scratch = input_scratch().lock().expect("input scratch poisoned");
+        let (t, f_bins, frames) =
+            prepare_demucs_inputs(left, right, &mut scratch, perf_enabled, &mut perf)?;
+
+        let lock_start = perf_enabled.then(Instant::now);
+        let mut session = SESSION
+            .get()
+            .expect("engine::preload first")
+            .lock()
+            .expect("session poisoned");
+        if let Some(start) = lock_start {
+            perf.lock_wait_ns += start.elapsed().as_nanos();
+        }
+
+        let (out_time, out_freq) = run_demucs_raw_from_inputs(
+            &mut session,
+            io_spec(),
+            t,
+            f_bins,
+            frames,
+            &scratch.time_branch,
+            &scratch.spec_branch,
+            perf_enabled,
+            &mut perf,
+        )?;
+        drop(session);
+        drop(scratch);
+
+        decode_demucs_outputs(
+            out_time,
+            out_freq,
+            t,
+            f_bins,
+            frames,
+            perf_enabled,
+            &mut perf,
+        )?
+    };
+
+    let out = postprocess_demucs_output(raw, left, right, debug_enabled, perf_enabled, &mut perf)?;
+
+    if let Some(start) = total_start {
+        perf.total_ns = start.elapsed().as_nanos();
+        log_window_perf(&perf);
     }
 
-    let raw = run_demucs_raw_with_session(session, left, right)?;
+    Ok(out)
+}
+
+#[cfg(not(feature = "engine-mock"))]
+fn postprocess_demucs_output(
+    mut raw: DemucsRawOutput,
+    left: &[f32],
+    right: &[f32],
+    debug_enabled: bool,
+    perf_enabled: bool,
+    perf: &mut WindowPerf,
+) -> Result<Array3<f32>> {
+    let t = left.len();
     let num_sources = raw.num_sources;
 
-    // Debug: Check if model outputs are non-zero
     if debug_enabled {
         eprintln!(
             "Model output stats: time_max={:.6}, freq_max={:.6}",
@@ -519,15 +848,7 @@ fn run_window_demucs_with_session(
         );
     }
 
-    if !input_is_near_silent(left, right) && output_is_near_silent(raw.time_max, raw.freq_max) {
-        return Err(anyhow!(
-            "{} (time_max={:.3e}, freq_max={:.3e})",
-            NEAR_SILENT_ERROR_PREFIX,
-            raw.time_max,
-            raw.freq_max
-        )
-        .into());
-    }
+    ensure_output_is_not_near_silent(left, right, &raw)?;
 
     let source_specs: Vec<&[f32]> = (0..num_sources)
         .map(|src| {
@@ -536,46 +857,48 @@ fn run_window_demucs_with_session(
         })
         .collect();
 
-    let istft_results = istft_cac_stereo_parallel(
-        &source_specs,
-        DEMUCS_F,
-        DEMUCS_FRAMES,
-        DEMUCS_NFFT,
-        DEMUCS_HOP,
-        t,
-    );
+    let istft_start = perf_enabled.then(Instant::now);
+    {
+        let mut istft_ws = istft_scratch().lock().expect("iSTFT scratch poisoned");
+        istft_cac_stereo_sources_add_into(
+            &source_specs,
+            DEMUCS_F,
+            DEMUCS_FRAMES,
+            DEMUCS_NFFT,
+            DEMUCS_HOP,
+            t,
+            &mut istft_ws,
+            &mut raw.data_time,
+        );
+    }
+    if let Some(start) = istft_start {
+        perf.istft_ns += start.elapsed().as_nanos();
+    }
 
-    // Debug: Check iSTFT results
     if debug_enabled {
-        for (src_idx, (left, right)) in istft_results.iter().enumerate() {
-            let left_max = left.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
-            let right_max = right.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
+        for src_idx in 0..num_sources {
+            let src_time_offset = src_idx * 2 * t;
+            let left_mix = &raw.data_time[src_time_offset..src_time_offset + t];
+            let right_mix = &raw.data_time[src_time_offset + t..src_time_offset + 2 * t];
+            let left_max = left_mix.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
+            let right_max = right_mix.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
             eprintln!(
-                "iSTFT result [source {}]: left_max={:.6}, right_max={:.6}",
+                "Combined output [source {}]: left_max={:.6}, right_max={:.6}",
                 src_idx, left_max, right_max
             );
         }
     }
 
-    let mut result = Vec::with_capacity(num_sources * 2 * t);
+    let mix_start = perf_enabled.then(Instant::now);
 
-    for (src, (left_freq, right_freq)) in istft_results.into_iter().enumerate() {
-        // Extract time domain for this source [2, T]
-        let src_time_offset = src * 2 * t;
-        let left_time = &raw.data_time[src_time_offset..src_time_offset + t];
-        let right_time = &raw.data_time[src_time_offset + t..src_time_offset + 2 * t];
-
-        // Combine: output = time_domain + frequency_domain (after iSTFT)
-        for i in 0..t {
-            result.push(left_time[i] + left_freq[i]);
-        }
-        for i in 0..t {
-            result.push(right_time[i] + right_freq[i]);
-        }
+    if let Some(start) = mix_start {
+        perf.mix_ns += start.elapsed().as_nanos();
     }
 
-    let out = ndarray::Array3::from_shape_vec((num_sources, 2, t), result)?;
-    Ok(out)
+    Ok(ndarray::Array3::from_shape_vec(
+        (num_sources, 2, t),
+        raw.data_time,
+    )?)
 }
 
 #[cfg(not(feature = "engine-mock"))]
@@ -641,6 +964,21 @@ mod runtime_policy_tests {
         let loud = vec![5e-4f32; 16];
         assert!(input_is_near_silent(&quiet, &quiet));
         assert!(!input_is_near_silent(&loud, &quiet));
+    }
+
+    #[test]
+    fn preload_probe_input_is_loud_enough_for_health_checks() {
+        let (left, right) = build_preload_probe_input();
+        assert_eq!(left.len(), DEMUCS_T);
+        assert_eq!(right.len(), DEMUCS_T);
+        assert!(!input_is_near_silent(&left, &right));
+    }
+
+    #[test]
+    fn positional_binding_detection_requires_expected_input_order() {
+        assert!(use_positional_inputs(&["input", "x"]));
+        assert!(!use_positional_inputs(&["x", "input"]));
+        assert!(!use_positional_inputs(&["input"]));
     }
 }
 

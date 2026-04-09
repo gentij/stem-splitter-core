@@ -1,18 +1,26 @@
 #![cfg_attr(feature = "engine-mock", allow(dead_code))]
 
-use crate::{error::Result, io::ep_cache};
+use crate::{
+    error::Result,
+    io::{ep_cache, paths},
+};
 
 use anyhow::anyhow;
 use ort::{
     execution_providers::{ExecutionProvider, ExecutionProviderDispatch},
     session::Session,
 };
-use std::path::Path;
+use std::{num::NonZeroUsize, path::Path};
 
 // CUDA: Linux and Windows only
 #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
 use ort::execution_providers::CUDAExecutionProvider;
 // CoreML: macOS only (Apple Silicon)
+#[cfg(all(feature = "coreml", target_os = "macos"))]
+use ort::execution_providers::coreml::{
+    ComputeUnits as CoreMLComputeUnits, ModelFormat as CoreMLModelFormat,
+    SpecializationStrategy as CoreMLSpecializationStrategy,
+};
 #[cfg(all(feature = "coreml", target_os = "macos"))]
 use ort::execution_providers::CoreMLExecutionProvider;
 // DirectML: Windows only
@@ -21,6 +29,9 @@ use ort::execution_providers::DirectMLExecutionProvider;
 // oneDNN: x86 Linux/Windows only
 #[cfg(feature = "onednn")]
 use ort::execution_providers::OneDNNExecutionProvider;
+// XNNPACK: ARM/x86 CPU acceleration
+#[cfg(feature = "xnnpack")]
+use ort::execution_providers::XNNPACKExecutionProvider;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EpKind {
@@ -29,6 +40,7 @@ pub(crate) enum EpKind {
     CoreML,
     DirectML,
     OneDNN,
+    Xnnpack,
 }
 
 impl EpKind {
@@ -39,6 +51,7 @@ impl EpKind {
             EpKind::CoreML => "CoreML",
             EpKind::DirectML => "DirectML",
             EpKind::OneDNN => "oneDNN",
+            EpKind::Xnnpack => "XNNPACK",
         }
     }
 
@@ -49,6 +62,7 @@ impl EpKind {
             EpKind::CoreML => "coreml",
             EpKind::DirectML => "directml",
             EpKind::OneDNN => "onednn",
+            EpKind::Xnnpack => "xnnpack",
         }
     }
 }
@@ -191,8 +205,35 @@ where
                 }
             };
 
+        let recently_healthy =
+            ep_cache::is_recently_healthy(candidate.kind.env_name(), model_path)?;
+        if recently_healthy {
+            if debug_enabled {
+                eprintln!(
+                    "✅ Execution provider selected: {} (attempt #{}, cached healthy probe)",
+                    ep_name,
+                    idx + 1
+                );
+            }
+            return Ok(SelectedSession {
+                session,
+                kind: candidate.kind,
+            });
+        }
+
         match probe_session(&mut session) {
             Ok(()) => {
+                if let Err(cache_err) =
+                    ep_cache::mark_healthy(candidate.kind.env_name(), model_path)
+                {
+                    if debug_enabled {
+                        eprintln!(
+                            "⚠️  Failed to persist healthy EP probe entry for {}: {}",
+                            ep_name, cache_err
+                        );
+                    }
+                }
+
                 if debug_enabled {
                     eprintln!(
                         "✅ Execution provider selected: {} (attempt #{})",
@@ -213,6 +254,22 @@ where
                         e
                     )
                     .into());
+                }
+
+                if let Err(cache_err) =
+                    ep_cache::mark_unhealthy(candidate.kind.env_name(), model_path, &e.to_string())
+                {
+                    if debug_enabled {
+                        eprintln!(
+                            "⚠️  Failed to persist unhealthy EP cache entry for {}: {}",
+                            ep_name, cache_err
+                        );
+                    }
+                } else if debug_enabled {
+                    eprintln!(
+                        "ℹ️  Marked {} as unhealthy for this model (cached for 7 days)",
+                        ep_name
+                    );
                 }
 
                 if debug_enabled {
@@ -250,6 +307,87 @@ fn is_debug_enabled() -> bool {
     std::env::var("DEBUG_STEMS").is_ok()
 }
 
+fn parse_env_usize(name: &str) -> Option<usize> {
+    let raw = std::env::var(name).ok()?;
+    let parsed = raw.parse::<usize>().ok()?;
+    (parsed > 0).then_some(parsed)
+}
+
+fn parse_env_bool(name: &str) -> Option<bool> {
+    let raw = std::env::var(name).ok()?;
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+#[cfg(all(feature = "coreml", target_os = "macos"))]
+fn coreml_compute_units() -> CoreMLComputeUnits {
+    match std::env::var("STEMMER_COREML_UNITS")
+        .ok()
+        .as_deref()
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("all") => CoreMLComputeUnits::All,
+        Some("ane") | Some("cpuandneuralengine") | Some("cpu_and_neural_engine") => {
+            CoreMLComputeUnits::CPUAndNeuralEngine
+        }
+        Some("gpu") | Some("cpuandgpu") | Some("cpu_and_gpu") => CoreMLComputeUnits::CPUAndGPU,
+        Some("cpu") | Some("cpuonly") | Some("cpu_only") => CoreMLComputeUnits::CPUOnly,
+        _ => CoreMLComputeUnits::CPUAndGPU,
+    }
+}
+
+#[cfg(all(feature = "coreml", target_os = "macos"))]
+fn coreml_model_format() -> CoreMLModelFormat {
+    match std::env::var("STEMMER_COREML_MODEL_FORMAT")
+        .ok()
+        .as_deref()
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("neuralnetwork") | Some("neural_network") | Some("nn") => {
+            CoreMLModelFormat::NeuralNetwork
+        }
+        _ => CoreMLModelFormat::MLProgram,
+    }
+}
+
+#[cfg(all(feature = "coreml", target_os = "macos"))]
+fn coreml_specialization_strategy() -> CoreMLSpecializationStrategy {
+    match std::env::var("STEMMER_COREML_SPECIALIZATION")
+        .ok()
+        .as_deref()
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("fastprediction") | Some("fast_prediction") | Some("fast") => {
+            CoreMLSpecializationStrategy::FastPrediction
+        }
+        _ => CoreMLSpecializationStrategy::Default,
+    }
+}
+
+#[cfg(all(feature = "coreml", target_os = "macos"))]
+fn coreml_static_input_shapes() -> bool {
+    parse_env_bool("STEMMER_COREML_STATIC_INPUTS").unwrap_or(true)
+}
+
+fn xnnpack_threads() -> NonZeroUsize {
+    let configured = parse_env_usize("STEMMER_ORT_INTRA_THREADS").or_else(|| {
+        std::thread::available_parallelism()
+            .ok()
+            .map(|threads| threads.get())
+    });
+
+    NonZeroUsize::new(configured.unwrap_or(4)).expect("XNNPACK thread count must be non-zero")
+}
+
 fn should_skip_due_to_cache(
     kind: EpKind,
     forced_kind: Option<EpKind>,
@@ -266,6 +404,7 @@ fn parse_ep_kind(value: &str) -> Option<EpKind> {
         "coreml" => Some(EpKind::CoreML),
         "directml" => Some(EpKind::DirectML),
         "onednn" | "one-dnn" | "one_dnn" | "dnnl" => Some(EpKind::OneDNN),
+        "xnnpack" | "xnn" => Some(EpKind::Xnnpack),
         _ => None,
     }
 }
@@ -280,7 +419,7 @@ fn parse_disabled_ep_list(raw: Option<&str>) -> Result<Vec<EpKind>> {
     for token in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
         let kind = parse_ep_kind(token).ok_or_else(|| {
             anyhow!(
-                "Unknown execution provider '{}' in STEMMER_EP_DISABLE (valid: cuda, coreml, directml, onednn)",
+                "Unknown execution provider '{}' in STEMMER_EP_DISABLE (valid: cuda, coreml, directml, onednn, xnnpack)",
                 token
             )
         })?;
@@ -297,17 +436,25 @@ fn parse_disabled_ep_list(raw: Option<&str>) -> Result<Vec<EpKind>> {
     Ok(disabled)
 }
 
-fn default_ep_order_for_os(os: &str) -> Vec<EpKind> {
-    match os {
-        "windows" => vec![EpKind::Cuda, EpKind::DirectML, EpKind::OneDNN],
-        "macos" => vec![EpKind::CoreML, EpKind::OneDNN],
-        "linux" => vec![EpKind::Cuda, EpKind::OneDNN],
-        _ => vec![EpKind::OneDNN],
+fn default_ep_order_for_target(os: &str, arch: &str) -> Vec<EpKind> {
+    match (os, arch) {
+        ("windows", _) => vec![
+            EpKind::Cuda,
+            EpKind::DirectML,
+            EpKind::OneDNN,
+            EpKind::Xnnpack,
+        ],
+        ("macos", "aarch64") => vec![EpKind::CoreML, EpKind::Xnnpack],
+        ("macos", _) => vec![EpKind::Xnnpack],
+        ("linux", "aarch64") => vec![EpKind::Cuda, EpKind::Xnnpack],
+        ("linux", _) => vec![EpKind::Cuda, EpKind::OneDNN, EpKind::Xnnpack],
+        _ => vec![EpKind::Xnnpack, EpKind::OneDNN],
     }
 }
 
-fn resolve_ep_request_for_os(
+fn resolve_ep_request_for_target(
     os: &str,
+    arch: &str,
     force_cpu: bool,
     forced_ep: Option<&str>,
     disabled_raw: Option<&str>,
@@ -325,7 +472,7 @@ fn resolve_ep_request_for_os(
     if let Some(raw_forced) = forced_ep.map(str::trim).filter(|s| !s.is_empty()) {
         let forced_kind = parse_ep_kind(raw_forced).ok_or_else(|| {
             anyhow!(
-                "Unknown execution provider '{}' in STEMMER_EP_FORCE (valid: cpu, cuda, coreml, directml, onednn)",
+                "Unknown execution provider '{}' in STEMMER_EP_FORCE (valid: cpu, cuda, coreml, directml, onednn, xnnpack)",
                 raw_forced
             )
         })?;
@@ -353,7 +500,7 @@ fn resolve_ep_request_for_os(
         });
     }
 
-    let mut kinds = default_ep_order_for_os(os);
+    let mut kinds = default_ep_order_for_target(os, arch);
     kinds.retain(|kind| !disabled.contains(kind));
 
     Ok(EpRequest {
@@ -368,8 +515,9 @@ fn resolve_ep_request_from_env() -> Result<EpRequest> {
     let forced_ep = std::env::var("STEMMER_EP_FORCE").ok();
     let disabled_raw = std::env::var("STEMMER_EP_DISABLE").ok();
 
-    resolve_ep_request_for_os(
+    resolve_ep_request_for_target(
         std::env::consts::OS,
+        std::env::consts::ARCH,
         force_cpu,
         forced_ep.as_deref(),
         disabled_raw.as_deref(),
@@ -412,7 +560,20 @@ fn try_build_execution_provider(
         EpKind::CoreML => {
             #[cfg(all(feature = "coreml", target_os = "macos"))]
             {
-                let ep = CoreMLExecutionProvider::default();
+                let mut ep = CoreMLExecutionProvider::default()
+                    .with_model_format(coreml_model_format())
+                    .with_compute_units(coreml_compute_units())
+                    .with_static_input_shapes(coreml_static_input_shapes())
+                    .with_specialization_strategy(coreml_specialization_strategy());
+
+                if let Ok(cache_dir) = paths::coreml_cache_dir() {
+                    ep = ep.with_model_cache_dir(cache_dir.to_string_lossy().into_owned());
+                }
+
+                if is_debug_enabled() {
+                    ep = ep.with_profile_compute_plan(true);
+                }
+
                 check_provider_is_usable(&ep)?;
                 return Ok(ep.build());
             }
@@ -453,6 +614,19 @@ fn try_build_execution_provider(
                 return Err("Cargo feature `onednn` is not enabled".to_string());
             }
         }
+        EpKind::Xnnpack => {
+            #[cfg(feature = "xnnpack")]
+            {
+                let ep = XNNPACKExecutionProvider::default()
+                    .with_intra_op_num_threads(xnnpack_threads());
+                check_provider_is_usable(&ep)?;
+                return Ok(ep.build());
+            }
+            #[cfg(not(feature = "xnnpack"))]
+            {
+                return Err("Cargo feature `xnnpack` is not enabled".to_string());
+            }
+        }
     }
 }
 
@@ -463,22 +637,37 @@ mod tests {
     #[test]
     fn default_ep_order_is_platform_specific() {
         assert_eq!(
-            default_ep_order_for_os("windows"),
-            vec![EpKind::Cuda, EpKind::DirectML, EpKind::OneDNN]
+            default_ep_order_for_target("windows", "x86_64"),
+            vec![
+                EpKind::Cuda,
+                EpKind::DirectML,
+                EpKind::OneDNN,
+                EpKind::Xnnpack
+            ]
         );
         assert_eq!(
-            default_ep_order_for_os("macos"),
-            vec![EpKind::CoreML, EpKind::OneDNN]
+            default_ep_order_for_target("macos", "aarch64"),
+            vec![EpKind::CoreML, EpKind::Xnnpack]
         );
         assert_eq!(
-            default_ep_order_for_os("linux"),
-            vec![EpKind::Cuda, EpKind::OneDNN]
+            default_ep_order_for_target("macos", "x86_64"),
+            vec![EpKind::Xnnpack]
+        );
+        assert_eq!(
+            default_ep_order_for_target("linux", "x86_64"),
+            vec![EpKind::Cuda, EpKind::OneDNN, EpKind::Xnnpack]
+        );
+        assert_eq!(
+            default_ep_order_for_target("linux", "aarch64"),
+            vec![EpKind::Cuda, EpKind::Xnnpack]
         );
     }
 
     #[test]
     fn force_cpu_overrides_other_flags() {
-        let req = resolve_ep_request_for_os("linux", true, Some("cuda"), Some("onednn")).unwrap();
+        let req =
+            resolve_ep_request_for_target("linux", "x86_64", true, Some("cuda"), Some("onednn"))
+                .unwrap();
         assert!(req.force_cpu);
         assert!(req.kinds.is_empty());
         assert_eq!(req.forced_kind, None);
@@ -486,7 +675,8 @@ mod tests {
 
     #[test]
     fn force_specific_provider() {
-        let req = resolve_ep_request_for_os("linux", false, Some("CUDA"), None).unwrap();
+        let req =
+            resolve_ep_request_for_target("linux", "x86_64", false, Some("CUDA"), None).unwrap();
         assert!(!req.force_cpu);
         assert_eq!(req.kinds, vec![EpKind::Cuda]);
         assert_eq!(req.forced_kind, Some(EpKind::Cuda));
@@ -494,36 +684,52 @@ mod tests {
 
     #[test]
     fn disable_list_filters_auto_order() {
-        let req =
-            resolve_ep_request_for_os("windows", false, None, Some("directml, onednn")).unwrap();
-        assert_eq!(req.kinds, vec![EpKind::Cuda]);
+        let req = resolve_ep_request_for_target(
+            "windows",
+            "x86_64",
+            false,
+            None,
+            Some("directml, onednn"),
+        )
+        .unwrap();
+        assert_eq!(req.kinds, vec![EpKind::Cuda, EpKind::Xnnpack]);
         assert_eq!(req.forced_kind, None);
     }
 
     #[test]
     fn force_and_disable_conflict_errors() {
-        let err = resolve_ep_request_for_os("windows", false, Some("directml"), Some("directml"))
-            .unwrap_err()
-            .to_string();
+        let err = resolve_ep_request_for_target(
+            "windows",
+            "x86_64",
+            false,
+            Some("directml"),
+            Some("directml"),
+        )
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("STEMMER_EP_FORCE=directml conflicts with STEMMER_EP_DISABLE"));
     }
 
     #[test]
     fn invalid_values_error() {
-        let err_force = resolve_ep_request_for_os("linux", false, Some("invalid"), None)
-            .unwrap_err()
-            .to_string();
+        let err_force =
+            resolve_ep_request_for_target("linux", "x86_64", false, Some("invalid"), None)
+                .unwrap_err()
+                .to_string();
         assert!(err_force.contains("Unknown execution provider 'invalid' in STEMMER_EP_FORCE"));
 
-        let err_disable = resolve_ep_request_for_os("linux", false, None, Some("gpu"))
-            .unwrap_err()
-            .to_string();
+        let err_disable =
+            resolve_ep_request_for_target("linux", "x86_64", false, None, Some("gpu"))
+                .unwrap_err()
+                .to_string();
         assert!(err_disable.contains("Unknown execution provider 'gpu' in STEMMER_EP_DISABLE"));
     }
 
     #[test]
     fn force_value_is_case_and_whitespace_insensitive() {
-        let req = resolve_ep_request_for_os("macos", false, Some("  CoReMl  "), None).unwrap();
+        let req =
+            resolve_ep_request_for_target("macos", "aarch64", false, Some("  CoReMl  "), None)
+                .unwrap();
         assert_eq!(req.forced_kind, Some(EpKind::CoreML));
         assert_eq!(req.kinds, vec![EpKind::CoreML]);
     }
@@ -535,9 +741,19 @@ mod tests {
     }
 
     #[test]
+    fn xnnpack_aliases_are_supported() {
+        let disabled = parse_disabled_ep_list(Some("xnn, xnnpack")).unwrap();
+        assert_eq!(disabled, vec![EpKind::Xnnpack]);
+    }
+
+    #[test]
     fn empty_force_uses_default_order() {
-        let req = resolve_ep_request_for_os("linux", false, Some("   "), None).unwrap();
-        assert_eq!(req.kinds, vec![EpKind::Cuda, EpKind::OneDNN]);
+        let req =
+            resolve_ep_request_for_target("linux", "x86_64", false, Some("   "), None).unwrap();
+        assert_eq!(
+            req.kinds,
+            vec![EpKind::Cuda, EpKind::OneDNN, EpKind::Xnnpack]
+        );
         assert_eq!(req.forced_kind, None);
     }
 

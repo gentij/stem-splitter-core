@@ -1,4 +1,4 @@
-use std::{fs::File, path::Path};
+use std::{fs::File, io::BufWriter, path::Path};
 
 use anyhow::{Context, Result};
 use symphonia::core::{
@@ -8,6 +8,8 @@ use symphonia::core::{
 use symphonia::default::{get_codecs, get_probe};
 
 use crate::types::AudioData;
+
+pub type WavWriter = hound::WavWriter<BufWriter<File>>;
 
 pub fn read_audio<P: AsRef<Path>>(path: P) -> Result<AudioData> {
     let path: &Path = path.as_ref();
@@ -68,24 +70,35 @@ pub fn read_audio<P: AsRef<Path>>(path: P) -> Result<AudioData> {
 }
 
 pub fn write_audio(path: &str, audio: &AudioData) -> Result<()> {
-    let path_obj = std::path::Path::new(path);
-    if let Some(parent) = path_obj.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    let spec = hound::WavSpec {
-        channels: audio.channels,
-        sample_rate: audio.sample_rate,
-        bits_per_sample: 16,
-        sample_format: hound::SampleFormat::Int,
-    };
-
-    let mut writer = hound::WavWriter::create(path, spec)?;
+    let mut writer = create_wav_writer(path, audio.sample_rate, audio.channels)?;
     for sample in &audio.samples {
-        let s = (sample * i16::MAX as f32).clamp(i16::MIN as f32, i16::MAX as f32) as i16;
-        writer.write_sample(s)?;
+        writer.write_sample(sample_to_i16(*sample))?;
     }
 
     writer.finalize()?;
     Ok(())
+}
+
+pub fn create_wav_writer<P: AsRef<Path>>(
+    path: P,
+    sample_rate: u32,
+    channels: u16,
+) -> Result<WavWriter> {
+    let path = path.as_ref();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let spec = hound::WavSpec {
+        channels,
+        sample_rate,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+
+    Ok(hound::WavWriter::create(path, spec)?)
+}
+
+pub fn sample_to_i16(sample: f32) -> i16 {
+    (sample * i16::MAX as f32).clamp(i16::MIN as f32, i16::MAX as f32) as i16
 }

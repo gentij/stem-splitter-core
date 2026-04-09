@@ -1,6 +1,9 @@
 #![cfg_attr(feature = "engine-mock", allow(dead_code))]
 
-use crate::{error::Result, io::paths::ep_cache_file};
+use crate::{
+    error::Result,
+    io::paths::{ep_cache_file, ep_probe_cache_file},
+};
 
 use serde::{Deserialize, Serialize};
 use std::{
@@ -11,6 +14,7 @@ use std::{
 
 const CACHE_SCHEMA_VERSION: u32 = 1;
 const UNHEALTHY_TTL_SECS: u64 = 7 * 24 * 60 * 60;
+const HEALTHY_TTL_SECS: u64 = 24 * 60 * 60;
 
 #[derive(Debug, Clone)]
 struct EpCacheKey {
@@ -39,7 +43,33 @@ struct EpHealthCacheFile {
     entries: Vec<EpHealthEntry>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EpSuccessEntry {
+    provider: String,
+    model_id: String,
+    os: String,
+    arch: String,
+    ort_api: u32,
+    updated_at_unix: u64,
+    success_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EpSuccessCacheFile {
+    version: u32,
+    entries: Vec<EpSuccessEntry>,
+}
+
 impl Default for EpHealthCacheFile {
+    fn default() -> Self {
+        Self {
+            version: CACHE_SCHEMA_VERSION,
+            entries: Vec::new(),
+        }
+    }
+}
+
+impl Default for EpSuccessCacheFile {
     fn default() -> Self {
         Self {
             version: CACHE_SCHEMA_VERSION,
@@ -54,7 +84,10 @@ pub(crate) fn cache_bypass_enabled() -> bool {
 
 pub(crate) fn maybe_reset_from_env() -> Result<()> {
     let cache_path = ep_cache_file()?;
-    maybe_reset_cache_file(&cache_path, env_flag_enabled("STEMMER_EP_CACHE_RESET"))
+    let probe_cache_path = ep_probe_cache_file()?;
+    let reset_enabled = env_flag_enabled("STEMMER_EP_CACHE_RESET");
+    maybe_reset_cache_file(&cache_path, reset_enabled)?;
+    maybe_reset_cache_file(&probe_cache_path, reset_enabled)
 }
 
 pub(crate) fn is_unhealthy(provider: &str, model_path: &Path) -> Result<Option<String>> {
@@ -66,7 +99,21 @@ pub(crate) fn is_unhealthy(provider: &str, model_path: &Path) -> Result<Option<S
 pub(crate) fn mark_unhealthy(provider: &str, model_path: &Path, reason: &str) -> Result<()> {
     let cache_path = ep_cache_file()?;
     let key = build_key(provider, model_path);
+    let probe_cache_path = ep_probe_cache_file()?;
+    clear_healthy_in_file(&probe_cache_path, &key)?;
     mark_unhealthy_in_file(&cache_path, &key, reason)
+}
+
+pub(crate) fn is_recently_healthy(provider: &str, model_path: &Path) -> Result<bool> {
+    let cache_path = ep_probe_cache_file()?;
+    let key = build_key(provider, model_path);
+    is_recently_healthy_in_file(&cache_path, &key, cache_bypass_enabled())
+}
+
+pub(crate) fn mark_healthy(provider: &str, model_path: &Path) -> Result<()> {
+    let cache_path = ep_probe_cache_file()?;
+    let key = build_key(provider, model_path);
+    mark_healthy_in_file(&cache_path, &key)
 }
 
 fn env_flag_enabled(name: &str) -> bool {
@@ -122,7 +169,33 @@ fn load_cache_file(path: &Path) -> Result<EpHealthCacheFile> {
     Ok(parsed)
 }
 
+fn load_success_cache_file(path: &Path) -> Result<EpSuccessCacheFile> {
+    let raw = match fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(EpSuccessCacheFile::default())
+        }
+        Err(e) => return Err(e.into()),
+    };
+
+    let parsed = serde_json::from_str::<EpSuccessCacheFile>(&raw).unwrap_or_default();
+    if parsed.version != CACHE_SCHEMA_VERSION {
+        return Ok(EpSuccessCacheFile::default());
+    }
+
+    Ok(parsed)
+}
+
 fn save_cache_file(path: &Path, cache: &EpHealthCacheFile) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let raw = serde_json::to_string_pretty(cache)?;
+    fs::write(path, raw)?;
+    Ok(())
+}
+
+fn save_success_cache_file(path: &Path, cache: &EpSuccessCacheFile) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -139,11 +212,27 @@ fn entry_matches_key(entry: &EpHealthEntry, key: &EpCacheKey) -> bool {
         && entry.ort_api == key.ort_api
 }
 
+fn success_entry_matches_key(entry: &EpSuccessEntry, key: &EpCacheKey) -> bool {
+    entry.provider == key.provider
+        && entry.model_id == key.model_id
+        && entry.os == key.os
+        && entry.arch == key.arch
+        && entry.ort_api == key.ort_api
+}
+
 fn prune_expired_entries(cache: &mut EpHealthCacheFile, now: u64) -> bool {
     let before = cache.entries.len();
     cache
         .entries
         .retain(|entry| now.saturating_sub(entry.updated_at_unix) <= UNHEALTHY_TTL_SECS);
+    cache.entries.len() != before
+}
+
+fn prune_expired_success_entries(cache: &mut EpSuccessCacheFile, now: u64) -> bool {
+    let before = cache.entries.len();
+    cache
+        .entries
+        .retain(|entry| now.saturating_sub(entry.updated_at_unix) <= HEALTHY_TTL_SECS);
     cache.entries.len() != before
 }
 
@@ -212,6 +301,69 @@ fn mark_unhealthy_in_file(path: &Path, key: &EpCacheKey, reason: &str) -> Result
     }
 
     save_cache_file(path, &cache)
+}
+
+fn is_recently_healthy_in_file(
+    path: &Path,
+    key: &EpCacheKey,
+    bypass_enabled: bool,
+) -> Result<bool> {
+    if bypass_enabled {
+        return Ok(false);
+    }
+
+    let mut cache = load_success_cache_file(path)?;
+    let now = current_unix_secs();
+    let changed = prune_expired_success_entries(&mut cache, now);
+    let healthy = cache
+        .entries
+        .iter()
+        .any(|entry| success_entry_matches_key(entry, key));
+
+    if changed {
+        save_success_cache_file(path, &cache)?;
+    }
+
+    Ok(healthy)
+}
+
+fn mark_healthy_in_file(path: &Path, key: &EpCacheKey) -> Result<()> {
+    let mut cache = load_success_cache_file(path)?;
+    let now = current_unix_secs();
+    prune_expired_success_entries(&mut cache, now);
+
+    if let Some(entry) = cache
+        .entries
+        .iter_mut()
+        .find(|entry| success_entry_matches_key(entry, key))
+    {
+        entry.updated_at_unix = now;
+        entry.success_count = entry.success_count.saturating_add(1);
+    } else {
+        cache.entries.push(EpSuccessEntry {
+            provider: key.provider.clone(),
+            model_id: key.model_id.clone(),
+            os: key.os.clone(),
+            arch: key.arch.clone(),
+            ort_api: key.ort_api,
+            updated_at_unix: now,
+            success_count: 1,
+        });
+    }
+
+    save_success_cache_file(path, &cache)
+}
+
+fn clear_healthy_in_file(path: &Path, key: &EpCacheKey) -> Result<()> {
+    let mut cache = load_success_cache_file(path)?;
+    let before = cache.entries.len();
+    cache
+        .entries
+        .retain(|entry| !success_entry_matches_key(entry, key));
+    if cache.entries.len() != before {
+        save_success_cache_file(path, &cache)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -286,5 +438,59 @@ mod tests {
 
         maybe_reset_cache_file(&cache_path, true).unwrap();
         assert!(!cache_path.exists());
+    }
+
+    #[test]
+    fn success_cache_roundtrip_marks_recently_healthy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_path = tmp.path().join("ep_success_cache.json");
+        let model_path = tmp.path().join("model.onnx");
+        let key = build_key("coreml", &model_path);
+
+        mark_healthy_in_file(&cache_path, &key).unwrap();
+        assert!(is_recently_healthy_in_file(&cache_path, &key, false).unwrap());
+    }
+
+    #[test]
+    fn success_cache_expiry_is_pruned() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_path = tmp.path().join("ep_success_cache.json");
+        let model_path = tmp.path().join("model.onnx");
+        let key = build_key("coreml", &model_path);
+
+        let mut cache = EpSuccessCacheFile::default();
+        cache.entries.push(EpSuccessEntry {
+            provider: key.provider.clone(),
+            model_id: key.model_id.clone(),
+            os: key.os.clone(),
+            arch: key.arch.clone(),
+            ort_api: key.ort_api,
+            updated_at_unix: current_unix_secs().saturating_sub(HEALTHY_TTL_SECS + 10),
+            success_count: 1,
+        });
+        save_success_cache_file(&cache_path, &cache).unwrap();
+
+        assert!(!is_recently_healthy_in_file(&cache_path, &key, false).unwrap());
+        let reloaded = load_success_cache_file(&cache_path).unwrap();
+        assert!(reloaded.entries.is_empty());
+    }
+
+    #[test]
+    fn mark_unhealthy_clears_success_cache_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let success_cache_path = tmp.path().join("ep_success_cache.json");
+        let unhealthy_cache_path = tmp.path().join("ep_cache.json");
+        let model_path = tmp.path().join("model.onnx");
+        let key = build_key("coreml", &model_path);
+
+        mark_healthy_in_file(&success_cache_path, &key).unwrap();
+        assert!(is_recently_healthy_in_file(&success_cache_path, &key, false).unwrap());
+
+        clear_healthy_in_file(&success_cache_path, &key).unwrap();
+        mark_unhealthy_in_file(&unhealthy_cache_path, &key, "bad output").unwrap();
+        assert!(!is_recently_healthy_in_file(&success_cache_path, &key, false).unwrap());
+        assert!(is_unhealthy_in_file(&unhealthy_cache_path, &key, false)
+            .unwrap()
+            .is_some());
     }
 }

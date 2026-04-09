@@ -464,12 +464,13 @@ A: Yes! GPU acceleration is enabled by default and works across all platforms:
 - **Apple Silicon**: CoreML (M1/M2/M3/M4 Macs)
 - **Windows (any GPU)**: DirectML (NVIDIA, AMD, Intel)
 - **Intel**: oneDNN optimizations
+- **ARM/x86 CPU fallback**: XNNPACK acceleration when GPU EPs are unavailable or unhealthy
 
 The library automatically detects available hardware, validates execution provider output during early inference, and falls back to CPU when a provider is unhealthy. Unhealthy providers are cached per machine/model for 7 days so future runs skip known-bad EPs and start faster.
 
 You can control provider selection with environment variables:
 - `STEMMER_FORCE_CPU=1` — force CPU only
-- `STEMMER_EP_FORCE=cpu|cuda|coreml|directml|onednn` — force a specific provider (fails if unhealthy/unavailable)
+- `STEMMER_EP_FORCE=cpu|cuda|coreml|directml|onednn|xnnpack` — force a specific provider (fails if unhealthy/unavailable)
 - `STEMMER_EP_DISABLE=coreml,directml,...` — disable providers from auto mode
 - `DEBUG_STEMS=1` — print provider selection and fallback diagnostics
 - `STEMMER_EP_CACHE_BYPASS=1` — ignore unhealthy EP cache for one run
@@ -480,12 +481,20 @@ Optional ONNX Runtime thread tuning (advanced):
 - `STEMMER_ORT_INTER_THREADS=<n>`
 - `STEMMER_ORT_PARALLEL=0|1`
 
+Optional CoreML tuning (advanced, macOS):
+- `STEMMER_COREML_UNITS=all|gpu|ane|cpu`
+- `STEMMER_COREML_MODEL_FORMAT=mlprogram|neuralnetwork`
+- `STEMMER_COREML_SPECIALIZATION=fastprediction|default`
+- `STEMMER_COREML_STATIC_INPUTS=0|1`
+
 **Q: GPU acceleration does not work on my machine. Can I skip it?**  
 A: Yes. If a provider is known to fail on your setup, disable it so it is not tried at all.
 
 Examples:
 - Skip CoreML on Apple Silicon (avoids repeated CoreML attempts):
   - `STEMMER_EP_DISABLE=coreml cargo run --release --bin stem-splitter -- split --input song.mp3 --output ./out`
+- Force XNNPACK on Apple Silicon for comparison testing:
+  - `STEMMER_EP_FORCE=xnnpack cargo run --release --bin stem-splitter -- split --input song.mp3 --output ./out`
 - Force CPU-only mode (maximum stability):
   - `STEMMER_FORCE_CPU=1 cargo run --release --bin stem-splitter -- split --input song.mp3 --output ./out`
 
@@ -494,7 +503,7 @@ To apply this permanently in your shell:
   (or `export STEMMER_FORCE_CPU=1`)
 
 Quick troubleshooting:
-- Silent stems or very low output with GPU: `STEMMER_EP_DISABLE=coreml` (macOS) or disable the failing provider.
+- Silent stems or very low output with GPU: `STEMMER_EP_DISABLE=coreml` on Apple Silicon so auto mode can fall through to XNNPACK.
 - GPU forced for debugging but still bad output: remove `STEMMER_EP_FORCE` and let auto mode fallback.
 - Need detailed provider logs: set `DEBUG_STEMS=1`.
 - Need to retest a previously skipped GPU EP: use `STEMMER_EP_CACHE_BYPASS=1`.
