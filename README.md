@@ -26,7 +26,7 @@ Perfect for music production tools, DJ software, karaoke apps, or any applicatio
 
 - 🎵 **4-Stem Separation** — Isolate vocals, drums, bass, and other instruments
 - 🧠 **State-of-the-art AI** — Hybrid Transformer Demucs model (htdemucs)
-- 🚀 **GPU Acceleration** — CUDA, CoreML, DirectML, and oneDNN support (auto-detected)
+- 🚀 **GPU Acceleration** — CUDA, CoreML, DirectML, oneDNN, and XNNPACK support (auto-detected)
 - 📦 **Model Registry** — Built-in model registry with support for multiple models
 - 🎚️ **Multiple Formats** — Supports WAV, MP3, FLAC, OGG, and more via Symphonia
 - 📊 **Progress Tracking** — Real-time callbacks for download and split progress
@@ -450,6 +450,89 @@ cargo build --release
 
 ---
 
+## GPU Acceleration & Performance Tuning
+
+GPU acceleration is enabled by default. The library automatically selects the
+best execution provider available on the current machine, validates provider
+output during early inference, and falls back if a provider is unavailable or
+unhealthy.
+
+In internal testing, the current runtime improvements delivered up to roughly
+40% faster end-to-end split times, depending on hardware, OS, and provider.
+
+### Default Provider Order
+
+- macOS Apple Silicon: `CoreML -> XNNPACK -> CPU`
+- Linux x86_64: `CUDA -> oneDNN -> XNNPACK -> CPU`
+- Linux arm64: `CUDA -> XNNPACK -> CPU`
+- Windows: `CUDA -> DirectML -> oneDNN -> XNNPACK -> CPU`
+
+Notes:
+- `XNNPACK` is a fast CPU-side fallback, not a GPU backend
+- `Auto` is the recommended default for most users
+- Unhealthy providers are cached per machine/model for 7 days so future runs can skip known-bad paths and start faster
+
+### Common Controls
+
+- `STEMMER_FORCE_CPU=1` — force CPU-only mode
+- `STEMMER_EP_FORCE=cpu|cuda|coreml|directml|onednn|xnnpack` — force a specific provider; fails if unavailable or unhealthy
+- `STEMMER_EP_DISABLE=coreml,directml,...` — disable one or more providers from auto mode
+- `DEBUG_STEMS=1` — print provider selection, fallback, and health diagnostics
+- `STEMMER_EP_CACHE_BYPASS=1` — ignore remembered unhealthy providers for one run
+- `STEMMER_EP_CACHE_RESET=1` — clear remembered unhealthy providers before selecting
+- `STEMMER_PERF=1` — print per-window performance timing breakdowns
+
+### Advanced Tuning
+
+ONNX Runtime threading:
+- `STEMMER_ORT_INTRA_THREADS=<n>`
+- `STEMMER_ORT_INTER_THREADS=<n>`
+- `STEMMER_ORT_PARALLEL=0|1`
+
+CoreML tuning on macOS:
+- `STEMMER_COREML_UNITS=all|gpu|ane|cpu`
+- `STEMMER_COREML_MODEL_FORMAT=mlprogram|neuralnetwork`
+- `STEMMER_COREML_SPECIALIZATION=default|fastprediction`
+- `STEMMER_COREML_STATIC_INPUTS=0|1`
+
+These advanced options are mainly useful for benchmarking or exposing expert
+controls in a GUI. For most users, `Auto` is still the best choice.
+
+### Common Examples
+
+```bash
+# Recommended: let the library auto-select the best provider
+cargo run --release --bin stem-splitter -- split --input song.mp3 --output ./out
+
+# Force CUDA on Linux/Windows NVIDIA systems
+STEMMER_EP_FORCE=cuda cargo run --release --bin stem-splitter -- split --input song.mp3 --output ./out
+
+# Force CoreML on Apple Silicon
+STEMMER_EP_FORCE=coreml cargo run --release --bin stem-splitter -- split --input song.mp3 --output ./out
+
+# Force XNNPACK for comparison testing
+STEMMER_EP_FORCE=xnnpack cargo run --release --bin stem-splitter -- split --input song.mp3 --output ./out
+
+# Force CPU-only mode for maximum stability
+STEMMER_FORCE_CPU=1 cargo run --release --bin stem-splitter -- split --input song.mp3 --output ./out
+
+# Skip CoreML and let auto mode fall through to the next provider
+STEMMER_EP_DISABLE=coreml cargo run --release --bin stem-splitter -- split --input song.mp3 --output ./out
+
+# Show provider diagnostics and timing breakdowns
+DEBUG_STEMS=1 STEMMER_PERF=1 cargo run --release --bin stem-splitter -- split --input song.mp3 --output ./out
+```
+
+### Troubleshooting
+
+- Silent stems or very low output with GPU: disable the failing provider and retry in auto mode, for example `STEMMER_EP_DISABLE=coreml`
+- GPU forced for debugging but still bad output: remove `STEMMER_EP_FORCE` and let auto mode fall back
+- Need to retest a previously skipped provider: use `STEMMER_EP_CACHE_BYPASS=1`
+- Need to clear all remembered unhealthy providers: use `STEMMER_EP_CACHE_RESET=1`
+- Need to benchmark a provider on one machine: combine `STEMMER_EP_FORCE=...` with `STEMMER_PERF=1`
+
+---
+
 ## 🤔 FAQ
 
 **Q: Why is the first run slow?**  
@@ -459,27 +542,7 @@ A: The model (~200MB) is downloaded on first use. Subsequent runs are instant.
 A: Models are cached in your system's standard cache directory with SHA-256 verification for integrity.
 
 **Q: Can I use GPU acceleration?**  
-A: Yes! GPU acceleration is enabled by default and works across all platforms:
-- **NVIDIA GPUs**: CUDA (Linux, Windows)
-- **Apple Silicon**: CoreML (M1/M2/M3/M4 Macs)
-- **Windows (any GPU)**: DirectML (NVIDIA, AMD, Intel)
-- **Intel**: oneDNN optimizations
-- **ARM/x86 CPU fallback**: XNNPACK acceleration when GPU EPs are unavailable or unhealthy
-
-The library automatically detects available hardware, validates execution provider output during early inference, and falls back to CPU when a provider is unhealthy. Unhealthy providers are cached per machine/model for 7 days so future runs skip known-bad EPs and start faster.
-
-You can control provider selection with environment variables:
-- `STEMMER_FORCE_CPU=1` — force CPU only
-- `STEMMER_EP_FORCE=cpu|cuda|coreml|directml|onednn|xnnpack` — force a specific provider (fails if unhealthy/unavailable)
-- `STEMMER_EP_DISABLE=coreml,directml,...` — disable providers from auto mode
-- `DEBUG_STEMS=1` — print provider selection and fallback diagnostics
-- `STEMMER_EP_CACHE_BYPASS=1` — ignore unhealthy EP cache for one run
-- `STEMMER_EP_CACHE_RESET=1` — clear unhealthy EP cache before selecting providers
-
-Optional ONNX Runtime thread tuning (advanced):
-- `STEMMER_ORT_INTRA_THREADS=<n>`
-- `STEMMER_ORT_INTER_THREADS=<n>`
-- `STEMMER_ORT_PARALLEL=0|1`
+A: Yes. GPU acceleration is enabled by default. See `GPU Acceleration & Performance Tuning` for provider order, examples, and advanced controls.
 
 Optional CoreML tuning (advanced, macOS):
 - `STEMMER_COREML_UNITS=all|gpu|ane|cpu`
@@ -488,26 +551,7 @@ Optional CoreML tuning (advanced, macOS):
 - `STEMMER_COREML_STATIC_INPUTS=0|1`
 
 **Q: GPU acceleration does not work on my machine. Can I skip it?**  
-A: Yes. If a provider is known to fail on your setup, disable it so it is not tried at all.
-
-Examples:
-- Skip CoreML on Apple Silicon (avoids repeated CoreML attempts):
-  - `STEMMER_EP_DISABLE=coreml cargo run --release --bin stem-splitter -- split --input song.mp3 --output ./out`
-- Force XNNPACK on Apple Silicon for comparison testing:
-  - `STEMMER_EP_FORCE=xnnpack cargo run --release --bin stem-splitter -- split --input song.mp3 --output ./out`
-- Force CPU-only mode (maximum stability):
-  - `STEMMER_FORCE_CPU=1 cargo run --release --bin stem-splitter -- split --input song.mp3 --output ./out`
-
-To apply this permanently in your shell:
-- `export STEMMER_EP_DISABLE=coreml`
-  (or `export STEMMER_FORCE_CPU=1`)
-
-Quick troubleshooting:
-- Silent stems or very low output with GPU: `STEMMER_EP_DISABLE=coreml` on Apple Silicon so auto mode can fall through to XNNPACK.
-- GPU forced for debugging but still bad output: remove `STEMMER_EP_FORCE` and let auto mode fallback.
-- Need detailed provider logs: set `DEBUG_STEMS=1`.
-- Need to retest a previously skipped GPU EP: use `STEMMER_EP_CACHE_BYPASS=1`.
-- Need to clear all remembered unhealthy EPs: use `STEMMER_EP_CACHE_RESET=1`.
+A: Yes. Use `STEMMER_FORCE_CPU=1` to force CPU-only mode, or `STEMMER_EP_DISABLE=...` to skip only the provider that is failing.
 
 **Q: What's the quality compared to Python Demucs?**  
 A: Identical quality - we use the same model architecture, just optimized for ONNX.
@@ -525,7 +569,7 @@ A: Input audio is automatically resampled to 44.1kHz for processing.
 
 ## 🗺️ Roadmap
 
-- [x] GPU acceleration (CUDA, CoreML, DirectML, oneDNN)
+- [x] GPU acceleration (CUDA, CoreML, DirectML, oneDNN, XNNPACK)
 - [ ] Additional model support (6-stem models with guitar/piano)
 - [ ] Real-time processing mode
 - [ ] Streaming API support
