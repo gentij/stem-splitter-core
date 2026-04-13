@@ -1,6 +1,6 @@
 [package]
 name = "stem-splitter-core"
-version = "1.1.3"
+version = "1.2.0"
 edition = "2021"
 description = "Core library for AI-powered audio stem separation"
 license = "MIT OR Apache-2.0"
@@ -27,7 +27,7 @@ ndarray = "0.15"
 anyhow = "1"        
 symphonia = { version = "0.5", features = ["mp3", "wav"] }
 tempfile = "3.8"
-ort = { version = "2.0.0-rc.10", features = ["download-binaries"] }
+ort = { version = "=2.0.0-rc.11", features = ["download-binaries"] }
 serde = { version="1", features=["derive"] }
 serde_json = "1"
 reqwest = { version="0.12", features=["blocking","json"] }
@@ -49,7 +49,7 @@ httpmock = "0.7"              # to simulate remote manifest/model servers
 tempfile = "3.8"              # also used in tests for isolated dirs
 
 [features]
-default = ["cuda", "coreml", "directml", "onednn"]
+default = ["cuda", "coreml", "directml", "onednn", "xnnpack"]
 engine-mock = []
 
 # GPU acceleration providers - enable all by default, code handles platform detection
@@ -58,6 +58,7 @@ cuda = ["ort/cuda"]           # NVIDIA GPUs (Linux, Windows)
 coreml = ["ort/coreml"]       # Apple Silicon (macOS only)  
 directml = ["ort/directml"]   # DirectML (Windows only)
 onednn = ["ort/onednn"]       # Intel optimized (all platforms)
+xnnpack = ["ort/xnnpack"]     # ARM/x86 optimized CPU fallback
 
 [[bin]]
 name = "stem-splitter"

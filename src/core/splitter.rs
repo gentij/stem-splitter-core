@@ -1,21 +1,119 @@
 use crate::{
     core::{
-        audio::{read_audio, write_audio},
-        dsp::to_planar_stereo,
+        audio::{create_wav_writer, read_audio, sample_to_i16, WavWriter},
         engine,
     },
     error::Result,
     io::progress::{emit_split_progress, SplitProgress},
     model::model_manager::ensure_model,
-    types::{AudioData, SplitOptions, SplitResult},
+    types::{SplitOptions, SplitResult},
 };
 
 use std::{
     collections::HashMap,
-    fs,
     path::{Path, PathBuf},
 };
-use tempfile::tempdir;
+
+struct StemOutput {
+    stem_idx: usize,
+    stem_name: String,
+    writer: WavWriter,
+}
+
+fn audio_frame_count(samples: &[f32], channels: u16) -> usize {
+    let channels = usize::from(channels.max(1));
+    samples.len() / channels
+}
+
+fn fill_stereo_window(
+    samples: &[f32],
+    channels: u16,
+    start_frame: usize,
+    left_raw: &mut [f32],
+    right_raw: &mut [f32],
+) {
+    let channels = usize::from(channels.max(1));
+
+    for i in 0..left_raw.len() {
+        let frame = start_frame + i;
+        let base = frame * channels;
+        if base >= samples.len() {
+            left_raw[i] = 0.0;
+            right_raw[i] = 0.0;
+            continue;
+        }
+
+        let left = samples[base];
+        let right = if channels == 1 {
+            left
+        } else {
+            samples.get(base + 1).copied().unwrap_or(left)
+        };
+
+        left_raw[i] = left;
+        right_raw[i] = right;
+    }
+}
+
+fn build_output_paths(input_path: &str, output_dir: &str) -> (String, String, String, String) {
+    let file_stem = Path::new(input_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("output");
+    let base = PathBuf::from(output_dir).join(file_stem);
+
+    (
+        format!("{}_vocals.wav", base.to_string_lossy()),
+        format!("{}_drums.wav", base.to_string_lossy()),
+        format!("{}_bass.wav", base.to_string_lossy()),
+        format!("{}_other.wav", base.to_string_lossy()),
+    )
+}
+
+fn build_stem_outputs(
+    names: &[String],
+    stems_count: usize,
+    sample_rate: u32,
+    vocals_out: String,
+    drums_out: String,
+    bass_out: String,
+    other_out: String,
+) -> Result<Vec<StemOutput>> {
+    let mut name_idx: HashMap<String, usize> = HashMap::new();
+    for (i, name) in names.iter().enumerate() {
+        name_idx.insert(name.to_lowercase(), i);
+    }
+
+    let get_idx = |key: &str, fallback: usize| -> usize {
+        name_idx
+            .get(key)
+            .copied()
+            .unwrap_or(fallback.min(stems_count.saturating_sub(1)))
+    };
+
+    Ok(vec![
+        StemOutput {
+            stem_idx: get_idx("vocals", 0),
+            stem_name: "vocals".to_string(),
+            writer: create_wav_writer(&vocals_out, sample_rate, 2)?,
+        },
+        StemOutput {
+            stem_idx: get_idx("drums", 1),
+            stem_name: "drums".to_string(),
+            writer: create_wav_writer(&drums_out, sample_rate, 2)?,
+        },
+        StemOutput {
+            stem_idx: get_idx("bass", 2),
+            stem_name: "bass".to_string(),
+            writer: create_wav_writer(&bass_out, sample_rate, 2)?,
+        },
+        StemOutput {
+            stem_idx: get_idx("other", 3),
+            stem_name: "other".to_string(),
+            writer: create_wav_writer(&other_out, sample_rate, 2)?,
+        },
+    ])
+}
 
 pub fn split_file(input_path: &str, opts: SplitOptions) -> Result<SplitResult> {
     emit_split_progress(SplitProgress::Stage("resolve_model"));
@@ -32,8 +130,7 @@ pub fn split_file(input_path: &str, opts: SplitOptions) -> Result<SplitResult> {
 
     emit_split_progress(SplitProgress::Stage("read_audio"));
     let audio = read_audio(input_path)?;
-    let stereo = to_planar_stereo(&audio.samples, audio.channels);
-    let n = stereo.len();
+    let n = audio_frame_count(&audio.samples, audio.channels);
 
     if n == 0 {
         return Err(anyhow::anyhow!("Empty audio").into());
@@ -47,65 +144,15 @@ pub fn split_file(input_path: &str, opts: SplitOptions) -> Result<SplitResult> {
     }
 
     if std::env::var("DEBUG_STEMS").is_ok() {
-        eprintln!("Window settings: win={}, hop={}, overlap={}", win, hop, win - hop);
+        eprintln!(
+            "Window settings: win={}, hop={}, overlap={}",
+            win,
+            hop,
+            win - hop
+        );
     }
 
-    let stems_names = mf.stems.clone();
-    let mut stems_count = stems_names.len().max(1);
-
-    let tmp = tempdir()?;
-    let tmp_dir = tmp.path().to_path_buf();
-
-    let mut left_raw = vec![0f32; win];
-    let mut right_raw = vec![0f32; win];
-
-    // Accumulator for each stem - no windowing needed since model outputs are already processed
-    let mut acc: Vec<Vec<[f32; 2]>> = Vec::new();
-
-    let mut pos = 0usize;
-    let mut first_chunk = true;
-
-    emit_split_progress(SplitProgress::Stage("infer"));
-    while pos < n {
-        // Extract audio chunk
-        for i in 0..win {
-            let idx = pos + i;
-            if idx < n {
-                left_raw[i] = stereo[idx][0];
-                right_raw[i] = stereo[idx][1];
-            } else {
-                left_raw[i] = 0.0;
-                right_raw[i] = 0.0;
-            }
-        }
-
-        // Run inference - model already handles windowing internally
-        let out = engine::run_window_demucs(&left_raw, &right_raw)?;
-        let (s_count, _, t_out) = (out.shape()[0], out.shape()[1], out.shape()[2]);
-
-        if first_chunk {
-            stems_count = s_count;
-            acc = vec![vec![[0f32; 2]; n]; stems_count];
-            first_chunk = false;
-        }
-
-        // Copy only the non-overlapping part (first 'hop' samples of each window)
-        // This avoids overwriting data from previous windows
-        let copy_len = hop.min(t_out).min(n - pos);
-        for st in 0..stems_count {
-            for i in 0..copy_len {
-                acc[st][pos + i][0] = out[(st, 0, i)];
-                acc[st][pos + i][1] = out[(st, 1, i)];
-            }
-        }
-
-        if pos + hop >= n {
-            break;
-        }
-        pos += hop;
-    }
-
-    let names = if stems_names.is_empty() {
+    let names = if mf.stems.is_empty() {
         vec![
             "vocals".into(),
             "drums".into(),
@@ -113,79 +160,86 @@ pub fn split_file(input_path: &str, opts: SplitOptions) -> Result<SplitResult> {
             "other".into(),
         ]
     } else {
-        stems_names
+        mf.stems.clone()
     };
 
-    let mut name_idx: HashMap<String, usize> = HashMap::new();
-    for (i, name) in names.iter().enumerate() {
-        name_idx.insert(name.to_lowercase(), i);
-    }
+    let (vocals_out, drums_out, bass_out, other_out) =
+        build_output_paths(input_path, &opts.output_dir);
 
-    fs::create_dir_all(&opts.output_dir)?;
+    let mut left_raw = vec![0f32; win];
+    let mut right_raw = vec![0f32; win];
+    let mut stem_outputs: Vec<StemOutput> = Vec::new();
 
-    emit_split_progress(SplitProgress::Stage("write_stems"));
-    
-    if std::env::var("DEBUG_STEMS").is_ok() {
-        for st in 0..stems_count {
-            let max_val = acc[st].iter()
-                .map(|s| s[0].abs().max(s[1].abs()))
-                .fold(0.0f32, f32::max);
-            eprintln!("Accumulator [stem {}]: max_value={:.6}, samples={}", st, max_val, acc[st].len());
+    let mut pos = 0usize;
+    let mut chunk_done = 0usize;
+    let total_chunks = if n <= hop { 1 } else { (n - 1) / hop + 1 };
+    let mut first_chunk = true;
+
+    emit_split_progress(SplitProgress::Stage("infer"));
+    while pos < n {
+        fill_stereo_window(
+            &audio.samples,
+            audio.channels,
+            pos,
+            &mut left_raw,
+            &mut right_raw,
+        );
+
+        let out = engine::run_window_demucs(&left_raw, &right_raw)?;
+        let (stems_count, _, t_out) = (out.shape()[0], out.shape()[1], out.shape()[2]);
+
+        if first_chunk {
+            stem_outputs = build_stem_outputs(
+                &names,
+                stems_count,
+                mf.sample_rate,
+                vocals_out.clone(),
+                drums_out.clone(),
+                bass_out.clone(),
+                other_out.clone(),
+            )?;
+            first_chunk = false;
         }
-    }
-    
-    let stem_to_wav = |st: usize, base: &str| -> Result<String> {
-        let mut inter = Vec::with_capacity(n * 2);
 
-        for sample in &acc[st][..n] {
-            inter.push(sample[0]);
-            inter.push(sample[1]);
+        let copy_len = hop.min(t_out).min(n - pos);
+        for stem_output in &mut stem_outputs {
+            for i in 0..copy_len {
+                stem_output
+                    .writer
+                    .write_sample(sample_to_i16(out[(stem_output.stem_idx, 0, i)]))
+                    .map_err(anyhow::Error::from)?;
+                stem_output
+                    .writer
+                    .write_sample(sample_to_i16(out[(stem_output.stem_idx, 1, i)]))
+                    .map_err(anyhow::Error::from)?;
+            }
         }
 
-        emit_split_progress(SplitProgress::Writing {
-            stem: base.to_string(),
-            done: n,
-            total: n,
-            percent: 100.0,
+        chunk_done += 1;
+        emit_split_progress(SplitProgress::Chunks {
+            done: chunk_done,
+            total: total_chunks,
+            percent: chunk_done as f32 / total_chunks as f32 * 100.0,
         });
 
-        let data = AudioData {
-            samples: inter,
-            sample_rate: mf.sample_rate,
-            channels: 2,
-        };
+        if pos + hop >= n {
+            break;
+        }
+        pos += hop;
+    }
 
-        let p = tmp_dir.join(format!("{base}.wav"));
-        write_audio(p.to_str().unwrap(), &data)?;
-
-        Ok(p.to_string_lossy().into())
-    };
-
-    let get_idx = |key: &str, fallback: usize| -> usize {
-        name_idx
-            .get(key)
-            .copied()
-            .unwrap_or(fallback.min(stems_count.saturating_sub(1)))
-    };
-
-    let v_path = stem_to_wav(get_idx("vocals", 0), "vocals")?;
-    let d_path = stem_to_wav(get_idx("drums", 1), "drums")?;
-    let b_path = stem_to_wav(get_idx("bass", 2), "bass")?;
-    let o_path = stem_to_wav(get_idx("other", 3), "other")?;
+    emit_split_progress(SplitProgress::Stage("write_stems"));
+    for (idx, stem_output) in stem_outputs.into_iter().enumerate() {
+        emit_split_progress(SplitProgress::Writing {
+            stem: stem_output.stem_name,
+            done: idx + 1,
+            total: 4,
+            percent: (idx + 1) as f32 / 4.0 * 100.0,
+        });
+        stem_output.writer.finalize().map_err(anyhow::Error::from)?;
+    }
 
     emit_split_progress(SplitProgress::Stage("finalize"));
-
-    let file_stem = Path::new(input_path)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("output");
-    let base = PathBuf::from(&opts.output_dir).join(file_stem);
-
-    let vocals_out = copy_to(&v_path, &format!("{}_vocals.wav", base.to_string_lossy()))?;
-    let drums_out = copy_to(&d_path, &format!("{}_drums.wav", base.to_string_lossy()))?;
-    let bass_out = copy_to(&b_path, &format!("{}_bass.wav", base.to_string_lossy()))?;
-    let other_out = copy_to(&o_path, &format!("{}_other.wav", base.to_string_lossy()))?;
-
     emit_split_progress(SplitProgress::Finished);
 
     Ok(SplitResult {
@@ -194,9 +248,4 @@ pub fn split_file(input_path: &str, opts: SplitOptions) -> Result<SplitResult> {
         bass_path: bass_out,
         other_path: other_out,
     })
-}
-
-fn copy_to(src: &str, dst: &str) -> Result<String> {
-    fs::copy(src, dst)?;
-    Ok(dst.to_string())
 }

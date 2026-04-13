@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-04-13
+
+### ⚡ Performance & Acceleration
+
+This release focuses on making real-world splitting faster and making automatic
+acceleration more reliable across platforms.
+
+### Added
+- `XNNPACK` execution provider support as an additional accelerated fallback
+- Early execution-provider health probing during preload to reject bad providers before split work starts
+- Advanced acceleration tuning controls for CoreML and ONNX Runtime threading
+- Per-window performance diagnostics via `STEMMER_PERF=1`
+- Successful provider probe caching to reduce repeated startup overhead on known-good configurations
+
+### Changed
+- Improved automatic execution-provider ordering by OS and architecture
+- Apple Silicon now uses a more reliable `CoreML -> XNNPACK -> CPU` fallback path
+- CoreML sessions now use more explicit model/tuning options and compiled model caching
+- Stem writing now streams directly to output WAV files instead of building full-track accumulators in memory
+- Engine inference now reuses hot-path buffers, caches input binding strategy, and minimizes session lock scope
+- iSTFT reconstruction now reuses workspace buffers and accumulates directly into final output buffers
+
+### Performance
+- Up to ~40% faster end-to-end split times in internal testing, depending on hardware and provider
+- Large real-world improvement observed versus older builds in downstream app integration testing
+- Lower memory overhead during long splits due to streaming writes and reduced post-processing copies
+
+### Fixed
+- CoreML silent/near-silent output is now detected earlier and falls back more safely
+- Model manager tests now use isolated cache/model names so the full test suite is stable across repeated runs
+
 ## [1.1.0] - 2024-11-29
 
 ### ⚡ Performance & GPU Acceleration
@@ -58,7 +89,7 @@ This is a **major architectural change** moving from Python-based processing to 
 
 Earlier versions (< 1.0.0) used a Python-based approach and are not compatible with this release.
 
-[Unreleased]: https://github.com/gentij/stem-splitter-core/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/gentij/stem-splitter-core/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/gentij/stem-splitter-core/releases/tag/v1.2.0
 [1.1.0]: https://github.com/gentij/stem-splitter-core/releases/tag/v1.1.0
 [1.0.0]: https://github.com/gentij/stem-splitter-core/releases/tag/v1.0.0
-
