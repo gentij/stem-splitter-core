@@ -103,8 +103,13 @@ jobs:
             ## 🎉 stem-splitter-core v${{ steps.version.outputs.VERSION }}
 
             ### Changes
-            - Improve execution provider fallback (sequential EP attempts with CPU fallback)
-            - Add `STEMMER_FORCE_CPU` escape hatch for debugging
+            - Improve acceleration reliability with better execution-provider selection, health checks, and CPU fallback
+            - Add `XNNPACK` as an additional accelerated fallback alongside CUDA, CoreML, DirectML, and oneDNN
+            - Reduce end-to-end split time with streaming stem writes, reused hot-path buffers, and lower post-processing overhead
+            - Add advanced tuning controls for provider selection, CoreML, ONNX Runtime threading, and performance diagnostics
+
+            ### Performance
+            - Up to ~40% faster end-to-end split times in internal testing, depending on hardware and provider
 
             ### Installation
             ```toml

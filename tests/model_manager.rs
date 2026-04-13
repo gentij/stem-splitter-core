@@ -88,36 +88,29 @@ fn downloads_and_caches_model_then_reuses_cache() {
     let tmp_cache = tempdir().unwrap();
     let _cache_home = CacheHomeGuard::set(tmp_cache.path());
 
-    let (model_bytes, sha_hex, size) = make_fake_model_bytes(256 * 1024); // 256 KiB
-
-    let server = MockServer::start();
-
-    let model_mock = server.mock(|when, then| {
-        let unique = tmp_cache
-            .path()
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
-        let model_path = format!("/mdx_4stem_v1_{unique}.onnx");
-        when.method(GET).path(model_path.as_str());
-        then.status(200)
-            .header("Content-Length", size.to_string().as_str())
-            .body(model_bytes.clone()); // serve bytes
-    });
-
     let unique = tmp_cache
         .path()
         .file_name()
         .unwrap()
         .to_string_lossy()
         .into_owned();
+    let (model_bytes, sha_hex, size) = make_fake_model_bytes(256 * 1024);
+
+    let server = MockServer::start();
+
     let model_name = format!("mdx_4stem_v1_{unique}");
     let file_name = format!("mdx_4stem_v1_{unique}.onnx");
+    let model_path = format!("/{file_name}");
     let model_url = format!("{}/{}", server.base_url(), file_name);
 
-    let manifest_body = manifest_json(&model_name, &file_name, &model_url, &sha_hex, size);
+    let model_mock = server.mock(|when, then| {
+        when.method(GET).path(model_path.as_str());
+        then.status(200)
+            .header("Content-Length", size.to_string().as_str())
+            .body(model_bytes.clone());
+    });
 
+    let manifest_body = manifest_json(&model_name, &file_name, &model_url, &sha_hex, size);
     let manifest_path = format!("/{model_name}.json");
 
     let manifest_mock = server.mock(|when, then| {
@@ -141,7 +134,7 @@ fn downloads_and_caches_model_then_reuses_cache() {
         "cache path should be stable"
     );
 
-    model_mock.assert_hits(1); // still exactly one hit total
+    model_mock.assert_hits(1);
 }
 
 #[test]
@@ -150,6 +143,12 @@ fn checksum_mismatch_returns_error() {
     let tmp_cache = tempdir().unwrap();
     let _cache_home = CacheHomeGuard::set(tmp_cache.path());
 
+    let unique = tmp_cache
+        .path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     let (model_bytes, sha_hex, size) = make_fake_model_bytes(64 * 1024);
     let mut bad_sha = sha_hex.clone();
     let first = &bad_sha[0..1];
@@ -157,26 +156,19 @@ fn checksum_mismatch_returns_error() {
 
     let server = MockServer::start();
 
-    let unique = tmp_cache
-        .path()
-        .file_name()
-        .unwrap()
-        .to_string_lossy()
-        .into_owned();
-    let bad_path = format!("/bad_{unique}.onnx");
+    let model_name = format!("bad_model_{unique}");
+    let file_name = format!("bad_{unique}.onnx");
+    let model_path = format!("/{file_name}");
+    let model_url = format!("{}/{}", server.base_url(), file_name);
+
     let _model_mock = server.mock(|when, then| {
-        when.method(GET).path(bad_path.as_str());
+        when.method(GET).path(model_path.as_str());
         then.status(200)
             .header("Content-Length", size.to_string().as_str())
             .body(model_bytes.clone());
     });
 
-    let model_name = format!("bad_model_{unique}");
-    let file_name = format!("bad_{unique}.onnx");
-    let model_url = format!("{}/{}", server.base_url(), file_name);
-
     let manifest_body = manifest_json(&model_name, &file_name, &model_url, &bad_sha, size);
-
     let manifest_path = format!("/bad_{unique}.json");
 
     let _manifest_mock = server.mock(|when, then| {
